@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"sync/atomic"
 
 	"golang.org/x/sys/windows"
 
@@ -46,8 +47,108 @@ type Source struct {
 	// lastIfIdx — интерфейс последнего перехваченного пакета; используется при
 	// реинжекте ответных (inbound) пакетов из туннеля, у которых своего интерфейса
 	// нет. Инжект с IfIdx=0 стек ОС не привязывает к соединению.
-	lastIfIdx uint32
+	// Atomic: читатели/писатели работают параллельно.
+	lastIfIdx atomic.Uint32
 }
+
+// NewReader создаёт независимый приёмник со своими буферами. WinDivert допускает
+// параллельный Recv на одном хэндле, а один поток захвата упирается в потолок
+// раньше, чем канал.
+func (s *Source) NewReader() packet.Reader {
+	return &reader{
+		s:     s,
+		buf:   make([]byte, recvBufBytes),
+		addrs: make([]Address, BatchMax),
+		out:   make([]packet.Packet, 0, BatchMax),
+	}
+}
+
+// NewWriter создаёт независимый инжектор со своими буферами.
+func (s *Source) NewWriter() packet.Writer {
+	return &writer{
+		s:     s,
+		buf:   make([]byte, 0, recvBufBytes),
+		addrs: make([]Address, 0, BatchMax),
+	}
+}
+
+type reader struct {
+	s     *Source
+	buf   []byte
+	addrs []Address
+	out   []packet.Packet
+}
+
+func (r *reader) Recv(ctx context.Context) ([]packet.Packet, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	packetLen, addrCount, err := recvEx(r.s.h, r.buf, r.addrs)
+	if err != nil {
+		return nil, err
+	}
+	out, err := splitBatch(r.buf[:packetLen], r.addrs[:addrCount], r.out[:0])
+	if err != nil {
+		return out, err
+	}
+	if n := len(out); n > 0 && out[n-1].IfIndex != 0 {
+		r.s.lastIfIdx.Store(out[n-1].IfIndex)
+	}
+	r.out = out
+	return out, nil
+}
+
+type writer struct {
+	s     *Source
+	buf   []byte
+	addrs []Address
+}
+
+func (w *writer) Send(pkts []packet.Packet) error {
+	for len(pkts) > 0 {
+		n := len(pkts)
+		if n > BatchMax {
+			n = BatchMax
+		}
+		if err := w.sendChunk(pkts[:n]); err != nil {
+			return err
+		}
+		pkts = pkts[n:]
+	}
+	return nil
+}
+
+func (w *writer) sendChunk(pkts []packet.Packet) error {
+	w.buf = w.buf[:0]
+	w.addrs = w.addrs[:0]
+	for i := range pkts {
+		p := &pkts[i]
+		if len(p.Data) == 0 {
+			continue
+		}
+		w.buf = append(w.buf, p.Data...)
+		var a Address
+		a.SetLayer(LayerNetwork)
+		a.SetOutbound(p.Dir == packet.Outbound)
+		idx := p.IfIndex
+		if idx == 0 {
+			idx = w.s.lastIfIdx.Load()
+		}
+		a.SetIfIdx(idx)
+		w.addrs = append(w.addrs, a)
+	}
+	if len(w.addrs) == 0 {
+		return nil
+	}
+	_, err := sendEx(w.s.h, w.buf, w.addrs)
+	return err
+}
+
+var (
+	_ packet.MultiSource = (*Source)(nil)
+	_ packet.Reader      = (*reader)(nil)
+	_ packet.Writer      = (*writer)(nil)
+)
 
 // Open грузит WinDivert.dll (dllPath, рядом обязан лежать WinDivert64.sys) и
 // открывает NETWORK-хэндл по фильтру. Требует прав администратора.
@@ -90,7 +191,7 @@ func (s *Source) Recv(ctx context.Context) ([]packet.Packet, error) {
 		return out, err
 	}
 	if n := len(out); n > 0 && out[n-1].IfIndex != 0 {
-		s.lastIfIdx = out[n-1].IfIndex // запомнить интерфейс для реинжекта ответов
+		s.lastIfIdx.Store(out[n-1].IfIndex) // запомнить интерфейс для реинжекта ответов
 	}
 	return out, nil
 }
@@ -119,13 +220,16 @@ func (s *Source) sendChunk(pkts []packet.Packet) error {
 	s.sendAddr = s.sendAddr[:0]
 	for i := range pkts {
 		p := &pkts[i]
+		if len(p.Data) == 0 {
+			continue // пустой пакет инжектить нечего (и sendEx на нём паникует)
+		}
 		s.sendBuf = append(s.sendBuf, p.Data...)
 		var a Address
 		a.SetLayer(LayerNetwork)
 		a.SetOutbound(p.Dir == packet.Outbound)
 		idx := p.IfIndex
 		if idx == 0 {
-			idx = s.lastIfIdx // реинжект ответа на интерфейс перехваченного трафика
+			idx = s.lastIfIdx.Load() // реинжект ответа на интерфейс перехваченного трафика
 		}
 		a.SetIfIdx(idx)
 		s.sendAddr = append(s.sendAddr, a)

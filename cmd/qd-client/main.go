@@ -15,6 +15,7 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"strconv"
 )
 
 type options struct {
@@ -22,14 +23,22 @@ type options struct {
 	authority string // :authority в connect-ip URI (по умолчанию = server)
 	dll       string // путь к WinDivert.dll
 	noProxy   bool   // не трогать системный прокси
+	hybrid      bool // TCP через CONNECT-стрим, UDP датаграммами
+	recvWorkers int  // потоков захвата (1 — сохраняет порядок пакетов)
+	mtu         int  // MTU локального стека (≤ MTU интерфейса; PPPoE обычно 1480)
+	brutalMbps  int  // congestion: слать с этой полосой, игнорируя потери (0 — Cubic)
 }
 
 func main() {
 	var o options
 	flag.StringVar(&o.server, "server", "localhost:8443", "endpoint узла (host:port)")
 	flag.StringVar(&o.authority, "authority", "", "authority в connect-ip URI (по умолчанию = server)")
-	flag.StringVar(&o.dll, "dll", `C:\Users\jaywehosl\Downloads\WinDivert-2.2.2-A\x64\WinDivert.dll`, "путь к WinDivert.dll")
+	flag.StringVar(&o.dll, "dll", "", "путь к WinDivert.dll (пусто → вшитый распакуется в %APPDATA%\\QUICDiver)")
 	flag.BoolVar(&o.noProxy, "no-proxy", false, "не отключать системный прокси")
+	flag.BoolVar(&o.hybrid, "hybrid", true, "TCP через надёжный CONNECT-стрим, UDP датаграммами (false → всё датаграммами, модель B)")
+	flag.IntVar(&o.recvWorkers, "recv-workers", 1, "потоков захвата: 1 сохраняет порядок пакетов; >1 ускоряет скачивание ценой reordering")
+	flag.IntVar(&o.mtu, "mtu", 1500, "MTU локального стека; инжект идёт в интерфейс (у него обычно 1500), а не в PPPoE-путь")
+	flag.IntVar(&o.brutalMbps, "brutal", 0, "слать с полосой N Мбит/с, игнорируя потери (0 — обычный Cubic); ставить НИЖЕ реальной полосы отдачи")
 	pprofAddr := flag.String("pprof", "", "адрес pprof (напр. localhost:6061); пусто → выкл")
 	flag.Parse()
 	if o.authority == "" {
@@ -37,6 +46,13 @@ func main() {
 	}
 
 	log.SetPrefix("qd-client: ")
+
+	// congestion выбирается внутри quic-go (наш патч читает переменную) — флаг
+	// удобнее для релиза, чем требовать env от пользователя.
+	if o.brutalMbps > 0 {
+		os.Setenv("QD_BRUTAL_MBPS", strconv.Itoa(o.brutalMbps))
+		log.Printf("congestion: brutal %d Мбит/с (потери игнорируются)", o.brutalMbps)
+	}
 
 	if *pprofAddr != "" {
 		go func() { log.Printf("pprof: %v", http.ListenAndServe(*pprofAddr, nil)) }()

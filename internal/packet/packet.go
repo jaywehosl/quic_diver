@@ -48,3 +48,25 @@ type Source interface {
 	// Close освобождает драйвер/устройство захвата.
 	Close() error
 }
+
+// MultiSource — источник, допускающий параллельный приём/инжект несколькими
+// горутинами. Один поток захвата упирается в потолок задолго до полосы канала
+// (замерено: тракт с одним читателем/писателем режет ~700 Мбит до ~300).
+//
+// Каждый Reader/Writer держит СВОИ буферы, поэтому работают независимо.
+type MultiSource interface {
+	Source
+	NewReader() Reader
+	NewWriter() Writer
+}
+
+// Reader — независимый приёмник пакетов.
+type Reader interface {
+	// Recv возвращает батч; Packet.Data валидны до следующего Recv этого Reader.
+	Recv(ctx context.Context) ([]Packet, error)
+}
+
+// Writer — независимый инжектор пакетов.
+type Writer interface {
+	Send(pkts []Packet) error
+}

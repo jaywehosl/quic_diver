@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/netip"
 	"time"
@@ -62,8 +63,21 @@ type Stack struct {
 	mtu    int
 }
 
+// NewWithMTU — как New, но с явным MTU канала.
+//
+// Узлу нужен MTU туннеля (пакеты уедут в датаграммах), а клиентскому стеку — MTU
+// локальной сети: он общается с ОС через инжект, и мелкий MTU только дробит поток
+// на лишние пакеты.
+func NewWithMTU(d Dialer, mtu int) (*Stack, error) {
+	return newStack(d, mtu)
+}
+
 // New поднимает стек с TCP/UDP-форвардерами, направляющими трафик через d.
 func New(d Dialer) (*Stack, error) {
+	return newStack(d, channelMTU)
+}
+
+func newStack(d Dialer, mtu int) (*Stack, error) {
 	s := stack.New(stack.Options{
 		NetworkProtocols: []stack.NetworkProtocolFactory{
 			ipv4.NewProtocol, ipv6.NewProtocol,
@@ -72,7 +86,25 @@ func New(d Dialer) (*Stack, error) {
 			tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol4, icmp.NewProtocol6,
 		},
 	})
-	ep := channel.New(512, channelMTU, "")
+	// Буферы TCP заметно больше дефолтных gVisor: стек между CONNECT-стримом и
+	// приложением, и на дефолтах он становился узким местом (изолированный стрим
+	// давал 645 Мбит, полный тракт — 300-400, при том что CPU стека мизерный).
+	sndBuf := tcpip.TCPSendBufferSizeRangeOption{Min: 4 << 10, Default: 4 << 20, Max: 16 << 20}
+	if err := s.SetTransportProtocolOption(tcp.ProtocolNumber, &sndBuf); err != nil {
+		return nil, fmt.Errorf("tcp send buffer: %v", err)
+	}
+	rcvBuf := tcpip.TCPReceiveBufferSizeRangeOption{Min: 4 << 10, Default: 4 << 20, Max: 16 << 20}
+	if err := s.SetTransportProtocolOption(tcp.ProtocolNumber, &rcvBuf); err != nil {
+		return nil, fmt.Errorf("tcp recv buffer: %v", err)
+	}
+
+	ep := channel.New(4096, uint32(mtu), "")
+	// Источник доверенный (наш перехват / наш туннель), а у перехваченных
+	// исходящих контрольные суммы не досчитаны — их считает NIC (offload), а
+	// WinDivert перехватывает раньше: в заголовке остаётся 0x0000. Без этой
+	// capability стек бракует ВСЕ такие пакеты как malformed (nic.go выставляет
+	// pkt.RXChecksumValidated именно отсюда, поэтому флаг на пакете бесполезен).
+	ep.LinkEPCapabilities = stack.CapabilityRXChecksumOffload
 	if err := s.CreateNIC(nicID, ep); err != nil {
 		return nil, fmt.Errorf("create nic: %v", err)
 	}
@@ -87,7 +119,7 @@ func New(d Dialer) (*Stack, error) {
 		{Destination: header.IPv6EmptySubnet, NIC: nicID},
 	})
 
-	st := &Stack{stack: s, ep: ep, dialer: d, mtu: channelMTU}
+	st := &Stack{stack: s, ep: ep, dialer: d, mtu: mtu}
 
 	tcpFwd := tcp.NewForwarder(s, 0, maxInFlight, st.handleTCP)
 	s.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpFwd.HandlePacket)
@@ -95,6 +127,20 @@ func New(d Dialer) (*Stack, error) {
 	s.SetTransportProtocolHandler(udp.ProtocolNumber, udpFwd.HandlePacket)
 
 	return st, nil
+}
+
+// DebugStats — счётчики стека: видно, доходят ли пакеты до IP/TCP-слоя и почему
+// отбрасываются (битая сумма, чужой адрес, мусор).
+func (s *Stack) DebugStats() string {
+	st := s.stack.Stats()
+	return fmt.Sprintf("IP rcvd=%d malformed=%d badDst=%d disp=%d | TCP valid=%d invalid=%d csumErr=%d",
+		st.IP.PacketsReceived.Value(),
+		st.IP.MalformedPacketsReceived.Value(),
+		st.IP.InvalidDestinationAddressesReceived.Value(),
+		st.IP.PacketsDelivered.Value(),
+		st.TCP.ValidSegmentsReceived.Value(),
+		st.TCP.InvalidSegmentsReceived.Value(),
+		st.TCP.ChecksumErrors.Value())
 }
 
 // Run гоняет обмен туннель↔стек до отмены ctx. ingress держит горутину вызова,
@@ -106,7 +152,10 @@ func (s *Stack) Run(ctx context.Context, t Tunnel) error {
 
 // ingress: IP-пакеты из туннеля → стек.
 func (s *Stack) ingress(ctx context.Context, t Tunnel) error {
-	buf := make([]byte, s.mtu+header.IPv4MaximumHeaderSize)
+	// Буфер на максимальный IP-пакет, а не на MTU: на клиенте перехват идёт ДО
+	// сегментации (Windows LSO отдаёт пакеты до 64 КБ), и короткий буфер молча
+	// обрезал бы их — стек считал бы такие пакеты malformed.
+	buf := make([]byte, 65536+header.IPv4MaximumHeaderSize)
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -140,17 +189,25 @@ func (s *Stack) ingress(ctx context.Context, t Tunnel) error {
 
 // egress: IP-пакеты из стека → туннель (ответы клиенту).
 func (s *Stack) egress(ctx context.Context, t Tunnel) {
+	var errs uint64
 	for {
 		pkt := s.ep.ReadContext(ctx)
 		if pkt == nil {
 			return // ctx отменён / стек закрыт
 		}
 		b := pkt.ToBuffer()
-		if _, err := t.WritePacket(b.Flatten()); err != nil {
-			pkt.DecRef()
-			return
-		}
+		_, err := t.WritePacket(b.Flatten())
 		pkt.DecRef()
+		if err != nil {
+			// Сбой отправки ОДНОГО пакета — не повод глушить весь обратный путь.
+			// Раньше здесь стоял return: первая же временная ошибка инжекта
+			// навсегда останавливала доставку ответов, и снаружи это выглядело
+			// как «сеть внезапно умерла» (пакеты идут, ответы — нет).
+			errs++
+			if errs <= 3 || errs%1000 == 0 {
+				log.Printf("netstack: egress: %v (ошибок: %d, продолжаю)", err, errs)
+			}
+		}
 	}
 }
 
@@ -164,6 +221,7 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	outbound, err := s.dialer.DialTCP(ctx, dst)
 	cancel()
 	if err != nil {
+		log.Printf("netstack: dial %s: %v (RST инициатору)", dst, err)
 		r.Complete(true) // RST инициатору
 		return
 	}
@@ -171,6 +229,7 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	var wq waiter.Queue
 	ep, tcperr := r.CreateEndpoint(&wq)
 	if tcperr != nil {
+		log.Printf("netstack: CreateEndpoint %s: %v", dst, tcperr)
 		outbound.Close()
 		r.Complete(true)
 		return

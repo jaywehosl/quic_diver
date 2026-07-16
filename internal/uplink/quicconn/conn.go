@@ -190,11 +190,22 @@ func (d Dialer) Dial(ctx context.Context, endpoint string) (uplink.Conn, error) 
 var _ uplink.Dialer = Dialer{}
 
 // DefaultConfig — базовый quic.Config для QUIC Diver.
+//
+// Окна — чуть выше BDP и НЕ больше: BDP пути ≈ 768 Мбит × 14 мс ≈ 1.3 МБ.
+// Раздутые окна (пробовали 32/64 МБ) разрешают держать в полёте десятки
+// мегабайт — они встают в очередь на пути, и это классический bufferbloat:
+// замерено RTT под нагрузкой p95 3.4 с (против 32 мс) и throughput 117 Мбит
+// (против 560). Стартовое окно чуть больше дефолтных 512 КБ, чтобы не ждать
+// авто-тюнинг, потолок оставляем близким к дефолту quic-go.
 func DefaultConfig() *quic.Config {
 	return &quic.Config{
-		EnableDatagrams: true,
-		MaxIdleTimeout:  30 * time.Second,
-		KeepAlivePeriod: 15 * time.Second,
+		EnableDatagrams:                true,
+		MaxIdleTimeout:                 30 * time.Second,
+		KeepAlivePeriod:                15 * time.Second,
+		InitialStreamReceiveWindow:     2 << 20, // ~1.5x BDP
+		MaxStreamReceiveWindow:         6 << 20, // дефолт quic-go
+		InitialConnectionReceiveWindow: 3 << 20,
+		MaxConnectionReceiveWindow:     15 << 20, // дефолт quic-go
 	}
 }
 

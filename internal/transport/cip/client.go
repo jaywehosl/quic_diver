@@ -31,8 +31,14 @@ import (
 type Client struct {
 	qc *quicconn.Conn
 	h3 *http3.Transport
+	cc *http3.ClientConn
 	ip *connectip.Conn
 }
+
+// H3Conn — то же HTTP/3-соединение, поверх которого поднят connect-ip. Гибрид
+// открывает через него CONNECT-стримы для TCP-флоу, поэтому и датаграммы, и
+// стримы делят одну QUIC-сессию: один handshake, один congestion-control.
+func (c *Client) H3Conn() *http3.ClientConn { return c.cc }
 
 // Dial устанавливает туннель к узлу.
 //   - endpoint: host:port (host — доменное имя, arch3);
@@ -54,7 +60,7 @@ func Dial(ctx context.Context, endpoint string, tmpl *uritemplate.Template, tlsC
 		qc.Close()
 		return nil, nil, err
 	}
-	return &Client{qc: qc, h3: h3tr, ip: ipConn}, rsp, nil
+	return &Client{qc: qc, h3: h3tr, cc: cc, ip: ipConn}, rsp, nil
 }
 
 // WritePacket отправляет сырой IP-пакет в туннель. Если пакет превышает путь,

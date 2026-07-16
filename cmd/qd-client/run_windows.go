@@ -10,12 +10,15 @@ import (
 	"net"
 	"net/netip"
 
+	"quicdiver/internal/client/connectdial"
 	"quicdiver/internal/client/nat"
 	"quicdiver/internal/client/sysproxy"
 	"quicdiver/internal/engine/connectip"
+	"quicdiver/internal/engine/hybrid"
 	"quicdiver/internal/guard"
 	"quicdiver/internal/packet/windivert"
 	"quicdiver/internal/server"
+	"quicdiver/internal/server/netstack"
 	"quicdiver/internal/transport/cip"
 )
 
@@ -59,9 +62,23 @@ func run(ctx context.Context, o options) error {
 	filter := windivert.BuildFilter(windivert.CaptureConfig{TCP: true, UDP: true, Bypass: bypass})
 	log.Printf("filter: %s", filter)
 
-	src, err := windivert.Open(o.dll, filter, 0) // боевой отвод
+	// WinDivert вшит в .exe: распаковываем в рабочую папку и грузим оттуда.
+	// -dll переопределяет (для отладки со своей сборкой драйвера).
+	dll := o.dll
+	if dll == "" {
+		dir, err := windivert.DefaultDir()
+		if err != nil {
+			return fmt.Errorf("рабочая папка: %w", err)
+		}
+		if dll, err = windivert.Extract(dir); err != nil {
+			return fmt.Errorf("распаковать WinDivert: %w", err)
+		}
+		log.Printf("WinDivert распакован в %s", dir)
+	}
+
+	src, err := windivert.Open(dll, filter, 0) // боевой отвод
 	if err != nil {
-		return fmt.Errorf("windivert open: %w", err)
+		return fmt.Errorf("windivert open: %w (нужны права администратора)", err)
 	}
 	defer src.Close()
 
@@ -89,9 +106,26 @@ func run(ctx context.Context, o options) error {
 	log.Printf("узел назначил адреса: %v", assigned)
 	rewriter := nat.New([]netip.Addr{realIP}, assigned)
 
-	// 7. Гонять трафик.
+	// 7. Гибрид: TCP-флоу терминирует локальный gVisor и уводит в надёжный
+	//    CONNECT-стрим (потери туннеля закрывает ретрансмит QUIC); UDP остаётся на
+	//    датаграммах connect-ip. Замерено: TCP-стрим 494 Мбит/stddev 9% против
+	//    115 Мбит/пила на датаграммах.
+	if o.hybrid {
+		// MTU локального стека. Инжектим пакеты в ОС как «пришедшие из сети»,
+		// поэтому они не должны превышать MTU интерфейса: при PPPoE это обычно
+		// 1480 и меньше, а пакет крупнее ОС просто отбросит. Дефолт 1400 — с
+		// запасом под PPPoE/VPN; -mtu задаёт явно.
+		ns, err := netstack.NewWithMTU(connectdial.Dialer{CC: client.H3Conn()}, o.mtu)
+		if err != nil {
+			return fmt.Errorf("netstack: %w", err)
+		}
+		eng := hybrid.New(g, rewriter, ns, o.recvWorkers)
+		log.Print("проксирование запущено (ГИБРИД: TCP→стрим, UDP→датаграмма)")
+		return eng.Run(ctx, src, client)
+	}
+
 	eng := connectip.New(g, rewriter)
-	log.Print("проксирование запущено")
+	log.Print("проксирование запущено (модель B: всё датаграммами)")
 	return eng.Run(ctx, src, client)
 }
 

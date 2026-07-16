@@ -190,6 +190,9 @@ func recvEx(h windows.Handle, packet []byte, addrs []Address) (packetLen, addrCo
 
 // sendEx инжектит батч пакетов с соответствующими адресами.
 func sendEx(h windows.Handle, packet []byte, addrs []Address) (sentLen uint, err error) {
+	if len(packet) == 0 || len(addrs) == 0 {
+		return 0, nil // нечего слать; иначе &packet[0] паникует
+	}
 	var sl uint32
 	r, _, e := procSendEx.Call(
 		uintptr(h),

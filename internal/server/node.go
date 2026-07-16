@@ -10,11 +10,16 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/netip"
+	"sync/atomic"
+	"time"
 
 	connectip "github.com/quic-go/connect-ip-go"
+	quic "github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/yosida95/uritemplate/v3"
 
@@ -82,16 +87,108 @@ func Run(ctx context.Context, cfg Config) error {
 		go serveTunnel(ctx, conn, cfg)
 	})
 
+	// Обычный CONNECT (RFC 9114) — надёжный stream для TCP-флоу гибрида: ретрансмит
+	// делает QUIC, поэтому внутренний TCP клиента потерь туннеля не видит.
+	//
+	// Ловим ДО mux: у такого запроса URL в authority-form (host:port), а ServeMux
+	// роутит по path и вернул бы 404.
+	//
+	// Отличать от Extended CONNECT (RFC 9220), которым установлен connect-ip: у
+	// него есть :protocol и НЕПУСТОЙ :path (/connect-ip) — он должен уйти в mux.
+	// У обычного CONNECT :path пустой (см. requestFromHeaders в http3).
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		isPlainConnect := r.Method == http.MethodConnect &&
+			r.URL != nil && r.URL.Path == "" && r.Host != ""
+		if isPlainConnect {
+			serveConnect(w, r, cfg)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+
 	srv := &http3.Server{
-		Handler:         mux,
+		Handler:         handler,
 		EnableDatagrams: true,
 		TLSConfig:       cfg.TLS,
+		QUICConfig: &quic.Config{
+			// В гибриде КАЖДЫЙ TCP-флоу клиента — отдельный CONNECT-стрим, а
+			// браузер с мессенджером легко держат сотни соединений. Дефолт
+			// quic-go (100) исчерпывается мгновенно: новые CONNECT молча ждут
+			// разрешения и отваливаются по таймауту — снаружи это выглядит как
+			// «интернет упал».
+			MaxIncomingStreams: 4096,
+			EnableDatagrams:    true,
+			MaxIdleTimeout:     30 * time.Second,
+			KeepAlivePeriod:    15 * time.Second,
+			// Окна чуть выше BDP и не больше — см. quicconn.DefaultConfig:
+			// раздутые окна дают bufferbloat (RTT p95 3.4 с, throughput ×5 вниз).
+			InitialStreamReceiveWindow:     2 << 20,
+			MaxStreamReceiveWindow:         6 << 20,
+			InitialConnectionReceiveWindow: 3 << 20,
+			MaxConnectionReceiveWindow:     15 << 20,
+		},
 	}
 	go func() {
 		<-ctx.Done()
 		srv.Close()
 	}()
 	return srv.Serve(udp)
+}
+
+// serveConnect обслуживает CONNECT-туннель одного TCP-флоу: соединяется с
+// запрошенным адресом (direct; chain придёт сюда же через Dialer) и склеивает
+// поток с QUIC-стримом.
+// liveConnects — сколько CONNECT-стримов сейчас открыто. Если счётчик только
+// растёт при простое — стримы утекают (флоу закончился, а стрим не закрыт).
+var liveConnects atomic.Int64
+
+func serveConnect(w http.ResponseWriter, r *http.Request, cfg Config) {
+	dst, err := netip.ParseAddrPort(r.Host)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	n := liveConnects.Add(1)
+	defer liveConnects.Add(-1)
+	if n%256 == 0 {
+		log.Printf("CONNECT-стримов живо: %d", n)
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	out, err := cfg.Dialer.DialTCP(ctx, dst)
+	cancel()
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		return
+	}
+	defer out.Close()
+
+	w.WriteHeader(http.StatusOK)
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush() // отдать 200 сразу, не дожидаясь данных
+	}
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(out, r.Body) // клиент → внешний хост
+		if cw, ok := out.(interface{ CloseWrite() error }); ok {
+			_ = cw.CloseWrite()
+		}
+		close(done)
+	}()
+	_, _ = io.Copy(flushWriter{w}, out) // внешний хост → клиент
+	<-done
+}
+
+// flushWriter флашит стрим после каждой записи — иначе HTTP/3 придержит данные
+// в буфере и получится рваная доставка.
+type flushWriter struct{ w http.ResponseWriter }
+
+func (fw flushWriter) Write(p []byte) (int, error) {
+	n, err := fw.w.Write(p)
+	if f, ok := fw.w.(http.Flusher); ok {
+		f.Flush()
+	}
+	return n, err
 }
 
 // serveTunnel назначает клиенту адрес/маршруты и запускает forwarder.

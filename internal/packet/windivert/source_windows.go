@@ -42,6 +42,11 @@ type Source struct {
 
 	sendBuf  []byte
 	sendAddr []Address
+
+	// lastIfIdx — интерфейс последнего перехваченного пакета; используется при
+	// реинжекте ответных (inbound) пакетов из туннеля, у которых своего интерфейса
+	// нет. Инжект с IfIdx=0 стек ОС не привязывает к соединению.
+	lastIfIdx uint32
 }
 
 // Open грузит WinDivert.dll (dllPath, рядом обязан лежать WinDivert64.sys) и
@@ -80,7 +85,18 @@ func (s *Source) Recv(ctx context.Context) ([]packet.Packet, error) {
 	if err != nil {
 		return nil, err
 	}
-	return splitBatch(s.recvBuf[:packetLen], s.recvAddr[:addrCount], s.out[:0])
+	out, err := splitBatch(s.recvBuf[:packetLen], s.recvAddr[:addrCount], s.out[:0])
+	if err != nil {
+		return out, err
+	}
+	// Досчитать контрольные суммы (перехват до NIC-offload оставляет их неполными).
+	for i := range out {
+		calcChecksums(out[i].Data)
+	}
+	if n := len(out); n > 0 && out[n-1].IfIndex != 0 {
+		s.lastIfIdx = out[n-1].IfIndex // запомнить интерфейс для реинжекта ответов
+	}
+	return out, nil
 }
 
 // Send инжектит батч пакетов. Пакеты из туннеля (ответы) идут как inbound.
@@ -92,11 +108,18 @@ func (s *Source) Send(pkts []packet.Packet) error {
 	s.sendAddr = s.sendAddr[:0]
 	for i := range pkts {
 		p := &pkts[i]
+		if p.Dir == packet.Inbound {
+			calcChecksums(p.Data) // страховка после NAT-подмены адреса
+		}
 		s.sendBuf = append(s.sendBuf, p.Data...)
 		var a Address
 		a.SetLayer(LayerNetwork)
 		a.SetOutbound(p.Dir == packet.Outbound)
-		a.SetIfIdx(p.IfIndex)
+		idx := p.IfIndex
+		if idx == 0 {
+			idx = s.lastIfIdx // реинжект ответа на интерфейс перехваченного трафика
+		}
+		a.SetIfIdx(idx)
 		s.sendAddr = append(s.sendAddr, a)
 	}
 	// TODO(quicdiver): если пакет модифицирован — пересчитать контрольные суммы

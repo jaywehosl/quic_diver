@@ -1,10 +1,10 @@
 // Command qd-client — клиентский сервис QUIC Diver (без GUI).
 //
-// GUI подаётся отдельно как локальная веб-страница (переиспользует HTTP-слой
-// decoy). Релизная сборка — один .exe: web-ассеты и WinDivert .dll/.sys вшиты,
-// распаковываются в %APPDATA%\QUICDiver.
+// Боевой поток (Windows): sysproxy off → WinDivert capture → connect-ip туннель к
+// узлу → NAT (assigned src) → engine перегоняет трафик; при выходе sysproxy
+// restore. Требует прав администратора (WinDivert грузит драйвер).
 //
-// Пока каркас: собирает local-guard и движок модели B, но захват/uplink — заглушки.
+// GUI — отдельная веб-страница (переиспользует HTTP-слой decoy) — следующий кирпич.
 package main
 
 import (
@@ -13,30 +13,32 @@ import (
 	"log"
 	"os"
 	"os/signal"
-
-	"quicdiver/internal/engine/connectip"
-	"quicdiver/internal/guard"
 )
 
+type options struct {
+	server    string // UDP endpoint узла, host:port
+	authority string // :authority в connect-ip URI (по умолчанию = server)
+	dll       string // путь к WinDivert.dll
+	noProxy   bool   // не трогать системный прокси
+}
+
 func main() {
-	cfg := flag.String("config", "", "путь к конфигу (по умолчанию %APPDATA%\\QUICDiver)")
+	var o options
+	flag.StringVar(&o.server, "server", "localhost:8443", "endpoint узла (host:port)")
+	flag.StringVar(&o.authority, "authority", "", "authority в connect-ip URI (по умолчанию = server)")
+	flag.StringVar(&o.dll, "dll", `C:\Users\jaywehosl\Downloads\WinDivert-2.2.2-A\x64\WinDivert.dll`, "путь к WinDivert.dll")
+	flag.BoolVar(&o.noProxy, "no-proxy", false, "не отключать системный прокси")
 	flag.Parse()
+	if o.authority == "" {
+		o.authority = o.server
+	}
 
 	log.SetPrefix("qd-client: ")
-	log.Printf("старт (config=%q)", *cfg)
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	g := guard.New(nil) // IP узлов добавятся после резолва конфига
-	eng := connectip.New(g)
-
-	// TODO(quicdiver): sysproxy off → открыть packet.Source (WinDivert) и
-	// cip.Client (PacketTunnel), затем eng.Run(ctx, src, client); при выходе —
-	// sysproxy restore. Сейчас — только каркас wiring.
-	_ = eng
-	log.Print("каркас: захват и туннель ещё не подключены")
-
-	<-ctx.Done()
-	log.Print("остановка")
+	if err := run(ctx, o); err != nil && ctx.Err() == nil {
+		log.Fatalf("run: %v", err)
+	}
+	log.Print("остановлен")
 }

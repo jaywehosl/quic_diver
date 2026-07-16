@@ -100,13 +100,15 @@ var (
 	loadOnce sync.Once
 	loadErr  error
 
-	dll          *windows.DLL
-	procOpen     *windows.Proc
-	procRecvEx   *windows.Proc
-	procSendEx   *windows.Proc
-	procClose    *windows.Proc
-	procSetParam *windows.Proc
-	procShutdown *windows.Proc
+	dll             *windows.DLL
+	procOpen        *windows.Proc
+	procRecvEx      *windows.Proc
+	procSendEx      *windows.Proc
+	procClose       *windows.Proc
+	procSetParam    *windows.Proc
+	procShutdown    *windows.Proc
+	procCompileFilt *windows.Proc
+	procCalcChecks  *windows.Proc
 )
 
 // Load загружает WinDivert.dll по абсолютному пути (в релизе — распакованная в
@@ -120,12 +122,14 @@ func Load(dllPath string) error {
 		}
 		dll = d
 		for name, p := range map[string]**windows.Proc{
-			"WinDivertOpen":     &procOpen,
-			"WinDivertRecvEx":   &procRecvEx,
-			"WinDivertSendEx":   &procSendEx,
-			"WinDivertClose":    &procClose,
-			"WinDivertSetParam": &procSetParam,
-			"WinDivertShutdown": &procShutdown,
+			"WinDivertOpen":                &procOpen,
+			"WinDivertRecvEx":              &procRecvEx,
+			"WinDivertSendEx":              &procSendEx,
+			"WinDivertClose":               &procClose,
+			"WinDivertSetParam":            &procSetParam,
+			"WinDivertShutdown":            &procShutdown,
+			"WinDivertHelperCompileFilter": &procCompileFilt,
+			"WinDivertHelperCalcChecksums": &procCalcChecks,
 		} {
 			pr, err := d.FindProc(name)
 			if err != nil {
@@ -219,4 +223,45 @@ func closeHandle(h windows.Handle) error {
 		return fmt.Errorf("WinDivertClose: %w", e)
 	}
 	return nil
+}
+
+// calcChecksums пересчитывает контрольные суммы пакета на месте (все: IP/TCP/UDP/
+// ICMP). Нужно для перехваченных исходящих пакетов: их L4-суммы часто не досчитаны
+// из-за NIC checksum offload, и удалённый стек их отбросит.
+func calcChecksums(pkt []byte) {
+	if len(pkt) == 0 {
+		return
+	}
+	procCalcChecks.Call(
+		uintptr(unsafe.Pointer(&pkt[0])),
+		uintptr(len(pkt)),
+		0, // pAddr не нужен
+		0, // flags = 0 → пересчитать все суммы
+	)
+}
+
+// CompileFilter проверяет корректность filter-выражения без открытия драйвера
+// (helper-функция, не требует прав администратора). Возвращает ok=true, если
+// фильтр валиден; иначе текст и позицию ошибки. Требует предварительного Load.
+func CompileFilter(filter string, layer Layer) (errText string, errPos int, ok bool) {
+	fb, err := windows.BytePtrFromString(filter)
+	if err != nil {
+		return err.Error(), 0, false
+	}
+	var errStr *byte // const char*, заполняется драйвером
+	var pos uint32
+	r, _, _ := procCompileFilt.Call(
+		uintptr(unsafe.Pointer(fb)),
+		uintptr(layer),
+		0, 0, // object, objLen — не нужны
+		uintptr(unsafe.Pointer(&errStr)),
+		uintptr(unsafe.Pointer(&pos)),
+	)
+	if r != 0 {
+		return "", 0, true
+	}
+	if errStr != nil {
+		errText = windows.BytePtrToString(errStr)
+	}
+	return errText, int(pos), false
 }

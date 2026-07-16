@@ -24,6 +24,15 @@ type PacketTunnel interface {
 	ReadPacket(b []byte) (int, error)
 }
 
+// Rewriter мутирует пакет на границе туннеля (на месте). В модели B это
+// клиентский NAT: Outbound переписывает src real→assigned перед отправкой,
+// Inbound — dst assigned→real после приёма (connect-ip требует назначенный src).
+// nil-Rewriter означает отсутствие подмены.
+type Rewriter interface {
+	Outbound(pkt []byte)
+	Inbound(pkt []byte)
+}
+
 // Engine гоняет трафик между локальным источником пакетов и туннелем до узла.
 type Engine interface {
 	// Run обрабатывает трафик до отмены ctx или фатальной ошибки.

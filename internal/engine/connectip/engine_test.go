@@ -114,7 +114,7 @@ func TestOutboundRoutesAndBypass(t *testing.T) {
 	}
 	tun := &mockTunnel{writeSig: make(chan struct{}, 2), readCh: make(chan []byte)}
 
-	e := New(guard.New(nil))
+	e := New(guard.New(nil), nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go e.Run(ctx, src, tun)
@@ -153,7 +153,7 @@ func TestInboundInject(t *testing.T) {
 	src := &mockSource{sentSig: make(chan struct{}, 1)}
 	tun := &mockTunnel{readCh: make(chan []byte, 1)}
 
-	e := New(guard.New(nil))
+	e := New(guard.New(nil), nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go e.Run(ctx, src, tun)

@@ -60,6 +60,10 @@ func (g *Guard) Bypass(dst netip.Addr) bool {
 	return false
 }
 
+// Bypasses возвращает список исключаемых префиксов (для построения WinDivert
+// filter — первый рубеж, чтобы драйвер не отдавал локалку в userspace).
+func (g *Guard) Bypasses() []netip.Prefix { return g.bypass }
+
 // AddServer добавляет IP узла в анти-петлю (напр. после ре-резолва домена).
 func (g *Guard) AddServer(ip netip.Addr) { g.servers[ip] = struct{}{} }
 

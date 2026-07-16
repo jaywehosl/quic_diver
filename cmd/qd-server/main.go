@@ -2,37 +2,77 @@
 // конфигом/наличием БД, не кодовой базой. Единый admin-токен коннектится к любому
 // узлу; узел может дозваниваться до upstream-узла как chain-аутбаунд.
 //
-// Пока каркас: поднимает decoy-обработчик, остальное (QUIC/H3-listener, gVisor+
-// netstack, БД, DNS, admin-API) — на следующих шагах.
+// Пока: боевой connect-ip узел с gVisor-forwarder (direct-выход) и decoy. TLS —
+// self-signed для локали (-authority localhost:8443). БД/auth/chain — следующие
+// кирпичи.
 package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"log"
+	"net/netip"
 	"os"
 	"os/signal"
 
-	"quicdiver/internal/server/decoy"
+	connectip "github.com/quic-go/connect-ip-go"
+
+	"quicdiver/internal/server"
+	"quicdiver/internal/server/netstack"
 )
 
 func main() {
-	cfg := flag.String("config", "", "путь к конфигу узла")
+	listen := flag.String("listen", ":8443", "UDP-адрес прослушивания QUIC")
+	authority := flag.String("authority", "localhost:8443", "host:port в connect-ip URI (совпадает с клиентом)")
+	assign := flag.String("assign", "10.7.0.2/32", "адрес, назначаемый клиенту")
+	certFile := flag.String("cert", "", "TLS cert (PEM); пусто → self-signed dev")
+	keyFile := flag.String("key", "", "TLS key (PEM)")
 	flag.Parse()
 
 	log.SetPrefix("qd-server: ")
-	log.Printf("старт (config=%q)", *cfg)
+
+	tlsConf, err := loadTLS(*certFile, *keyFile)
+	if err != nil {
+		log.Fatalf("tls: %v", err)
+	}
+
+	pfx, err := netip.ParsePrefix(*assign)
+	if err != nil {
+		log.Fatalf("bad -assign: %v", err)
+	}
+
+	cfg := server.Config{
+		Listen:        *listen,
+		Authority:     *authority,
+		ConnectIPPath: "/connect-ip",
+		TLS:           tlsConf,
+		Assign:        []netip.Prefix{pfx},
+		Routes: []connectip.IPRoute{
+			{StartIP: netip.MustParseAddr("0.0.0.0"), EndIP: netip.MustParseAddr("255.255.255.255")},
+			{StartIP: netip.MustParseAddr("::"), EndIP: netip.MustParseAddr("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff")},
+		},
+		Dialer: netstack.NetDialer{},
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	_ = decoy.Handler() // TODO(quicdiver): смонтировать на HTTP/3-listener :443
+	log.Printf("узел на %s (authority=%s, назначаю клиенту %s)", *listen, *authority, *assign)
+	if err := server.Run(ctx, cfg); err != nil && ctx.Err() == nil {
+		log.Fatalf("run: %v", err)
+	}
+	log.Print("остановлен")
+}
 
-	// TODO(quicdiver): открыть db.Store (SQLite), поднять MASQUE-listener с
-	// auth-роутингом (валидный токен→прокси, иначе→decoy), gVisor+netstack для
-	// выхода в интернет, chain-аутбаунды, DNS (DNS/DoT/DoH)+кеш, admin-API.
-	log.Print("каркас: сетевые слои узла ещё не подключены")
-
-	<-ctx.Done()
-	log.Print("остановка")
+// loadTLS берёт серт из файлов (реальный домен) или генерит self-signed (dev).
+func loadTLS(certFile, keyFile string) (*tls.Config, error) {
+	if certFile == "" || keyFile == "" {
+		return server.DevTLS()
+	}
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, err
+	}
+	return &tls.Config{Certificates: []tls.Certificate{cert}}, nil
 }

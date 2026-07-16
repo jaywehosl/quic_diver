@@ -24,6 +24,7 @@ import (
 	"github.com/yosida95/uritemplate/v3"
 
 	"quicdiver/internal/server/decoy"
+	"quicdiver/internal/server/dns"
 	"quicdiver/internal/server/netstack"
 )
 
@@ -44,6 +45,11 @@ type Config struct {
 	Routes []connectip.IPRoute
 	// Dialer — выход наружу: direct (netstack.NetDialer) или chain.
 	Dialer netstack.Dialer
+	// Resolver — DNS узла (кеш + upstream). nil → эндпоинт /dns-query не поднимается.
+	// Резолв обязан идти здесь: у клиента провайдер подменяет ответы на заглушку.
+	Resolver *dns.Resolver
+	// DNSPath — путь DoH-эндпоинта (RFC 8484), обычно "/dns-query".
+	DNSPath string
 }
 
 // Template строит URI Template connect-ip эндпоинта. Клиент и узел обязаны
@@ -73,6 +79,13 @@ func Run(ctx context.Context, cfg Config) error {
 
 	mux := http.NewServeMux()
 	mux.Handle("/", decoy.Handler()) // всё прочее — decoy
+
+	// DoH (RFC 8484) в том же HTTP/3-соединении, что и туннель: DNS клиента едет
+	// внутри QUIC, провайдеру его не видно и подменить нечего.
+	if cfg.Resolver != nil && cfg.DNSPath != "" {
+		mux.Handle(cfg.DNSPath, dns.Handler(cfg.Resolver))
+		log.Printf("DoH на %s", cfg.DNSPath)
+	}
 	mux.HandleFunc(cfg.ConnectIPPath, func(w http.ResponseWriter, r *http.Request) {
 		req, err := connectip.ParseRequest(r, tmpl)
 		if err != nil {

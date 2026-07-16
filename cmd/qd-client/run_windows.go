@@ -10,8 +10,14 @@ import (
 	"net"
 	"net/netip"
 
+	"github.com/quic-go/quic-go/http3"
+
 	"quicdiver/internal/client/connectdial"
+	"quicdiver/internal/client/dnsforward"
+	"quicdiver/internal/client/dnsproxy"
 	"quicdiver/internal/client/nat"
+	"quicdiver/internal/client/nat46"
+	"quicdiver/internal/client/sysdns"
 	"quicdiver/internal/client/sysproxy"
 	"quicdiver/internal/engine/connectip"
 	"quicdiver/internal/engine/hybrid"
@@ -106,6 +112,26 @@ func run(ctx context.Context, o options) error {
 	log.Printf("узел назначил адреса: %v", assigned)
 	rewriter := nat.New([]netip.Addr{realIP}, assigned)
 
+	// 6.5. NAT46 — только если своего IPv6 у машины нет. Тогда ОС не породит пакет
+	//      к v6-only хосту (ntc.party и подобные выглядят «несуществующими»), и мы
+	//      выдаём им фиктивный v4, подменяя его обратно при дозвоне. С настоящим v6
+	//      приложение само пойдёт по AAAA — синтез только мешал бы.
+	v6, err := setupNAT46(o.nat46)
+	if err != nil {
+		return err
+	}
+
+	// 6.6. DNS: локальный listener + подмена системного резолвера. Без этого
+	//      приложения спрашивают роутер (он в bypass как локальный), запрос уходит
+	//      мимо туннеля и провайдер отдаёт свою заглушку вместо реального адреса.
+	if !o.noDNS {
+		stopDNS, err := startDNS(ctx, client.H3Conn(), o.authority, v6)
+		if err != nil {
+			return fmt.Errorf("dns: %w", err)
+		}
+		defer stopDNS()
+	}
+
 	// 7. Гибрид: TCP-флоу терминирует локальный gVisor и уводит в надёжный
 	//    CONNECT-стрим (потери туннеля закрывает ретрансмит QUIC); UDP остаётся на
 	//    датаграммах connect-ip. Замерено: TCP-стрим 494 Мбит/stddev 9% против
@@ -115,7 +141,11 @@ func run(ctx context.Context, o options) error {
 		// поэтому они не должны превышать MTU интерфейса: при PPPoE это обычно
 		// 1480 и меньше, а пакет крупнее ОС просто отбросит. Дефолт 1400 — с
 		// запасом под PPPoE/VPN; -mtu задаёт явно.
-		ns, err := netstack.NewWithMTU(connectdial.Dialer{CC: client.H3Conn()}, o.mtu)
+		var dialer netstack.Dialer = connectdial.Dialer{CC: client.H3Conn()}
+		if v6 != nil {
+			dialer = nat46.Dialer{Inner: connectdial.Dialer{CC: client.H3Conn()}, Table: v6}
+		}
+		ns, err := netstack.NewWithMTU(dialer, o.mtu)
 		if err != nil {
 			return fmt.Errorf("netstack: %w", err)
 		}
@@ -127,6 +157,80 @@ func run(ctx context.Context, o options) error {
 	eng := connectip.New(g, rewriter)
 	log.Print("проксирование запущено (модель B: всё датаграммами)")
 	return eng.Run(ctx, src, client)
+}
+
+// setupNAT46 решает, включать ли синтез A для v6-only хостов.
+//
+// auto — по факту наличия своего глобального IPv6. Это состояние сети, а она
+// меняется на ходу (Wi-Fi с v6 ↔ LTE без него), поэтому решение переоценивает
+// supervisor при смене параметров сети, а не только старт.
+func setupNAT46(mode string) (*nat46.Table, error) {
+	switch mode {
+	case "off":
+		return nil, nil
+	case "on", "auto":
+	default:
+		return nil, fmt.Errorf("-nat46: нужно auto, on или off (получено %q)", mode)
+	}
+	if mode == "auto" && nat46.HostHasIPv6() {
+		log.Print("NAT46: выключен — у машины есть свой IPv6, приложения пойдут по AAAA сами")
+		return nil, nil
+	}
+	t := nat46.NewTable(nat46.DefaultPool, nat46.DefaultTTL)
+	log.Printf("NAT46: включён (своего IPv6 нет) — v6-only хосты получат адрес из %s", t.Pool())
+	return t, nil
+}
+
+// startDNS поднимает локальный резолвер на обоих loopback'ах и переводит на него
+// систему. Возвращает функцию остановки (она же возвращает прежний DNS).
+//
+// Порядок важен: сначала listener, потом подмена — иначе между подменой и
+// готовностью listener'а система осталась бы вообще без резолвера.
+func startDNS(ctx context.Context, cc *http3.ClientConn, authority string, v6 *nat46.Table) (func(), error) {
+	var ex dnsproxy.Exchanger = dnsforward.New(cc, "https://"+authority+"/dns-query")
+	if v6 != nil {
+		ex = nat46.NewResolver(ex, v6)
+	}
+	p, err := dnsproxy.New(dnsproxy.Config{
+		Addrs:    []string{net.JoinHostPort(sysdns.Loopback4, "53"), net.JoinHostPort(sysdns.Loopback6, "53")},
+		Exchange: ex,
+	})
+	if err != nil {
+		return nil, err
+	}
+	dnsCtx, cancel := context.WithCancel(ctx)
+	go func() {
+		if err := p.Run(dnsCtx); err != nil {
+			log.Printf("dns listener: %v", err)
+		}
+	}()
+
+	// Порт уже наш — значит другого экземпляра нет и осиротевший от прошлого
+	// падения DNS можно спокойно подобрать.
+	if found, err := sysdns.RestoreStale(); err != nil {
+		log.Printf("dns: не подобрать состояние прошлого запуска: %v", err)
+	} else if found {
+		log.Print("DNS: прошлый запуск завершился аварийно — прежний резолвер возвращён")
+	}
+
+	saved, err := sysdns.Apply()
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	log.Printf("DNS: слушаю %v, системный резолвер переведён на loopback", p.Addrs())
+
+	return func() {
+		cancel()
+		if err := saved.Restore(); err != nil {
+			log.Printf("dns restore: %v", err)
+		} else {
+			log.Print("системный DNS восстановлен")
+		}
+		if q, f := p.Stats(); q > 0 {
+			log.Printf("DNS: запросов %d, неудач %d", q, f)
+		}
+	}, nil
 }
 
 // primaryIP выбирает исходящий LAN-адрес по маршруту по умолчанию (сокет не шлёт

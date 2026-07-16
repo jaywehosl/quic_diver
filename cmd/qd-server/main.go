@@ -11,16 +11,21 @@ import (
 	"context"
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"log"
+	"net"
 	"net/http"
 	_ "net/http/pprof"
 	"net/netip"
 	"os"
 	"os/signal"
+	"strings"
+	"time"
 
 	connectip "github.com/quic-go/connect-ip-go"
 
 	"quicdiver/internal/server"
+	"quicdiver/internal/server/dns"
 	"quicdiver/internal/server/netstack"
 )
 
@@ -31,6 +36,12 @@ func main() {
 	certFile := flag.String("cert", "", "TLS cert (PEM); пусто → self-signed dev")
 	keyFile := flag.String("key", "", "TLS key (PEM)")
 	pprofAddr := flag.String("pprof", "", "адрес pprof (напр. localhost:6060); пусто → выкл")
+	dnsUpstream := flag.String("dns", "https://dns.google/dns-query",
+		"upstream DNS узла: https://... (DoH), tls://host:853 (DoT) или udp://host:53 (plain)")
+	dnsCache := flag.Int("dns-cache", 4096, "размер DNS-кеша в записях (0 — выключить)")
+	dnsTTL := flag.Duration("dns-ttl", 0, "принудительный TTL кеша (0 — брать из ответа)")
+	dnsMinTTL := flag.Duration("dns-min-ttl", 5*time.Second, "не кешировать короче")
+	dnsMaxTTL := flag.Duration("dns-max-ttl", time.Hour, "не кешировать дольше")
 	flag.Parse()
 
 	log.SetPrefix("qd-server: ")
@@ -49,10 +60,25 @@ func main() {
 		log.Fatalf("bad -assign: %v", err)
 	}
 
+	up, err := parseUpstream(*dnsUpstream)
+	if err != nil {
+		log.Fatalf("dns upstream: %v", err)
+	}
+	resolver := dns.New(dns.Config{
+		Upstream:    up,
+		CacheSize:   *dnsCache,
+		TTLOverride: *dnsTTL,
+		MinTTL:      *dnsMinTTL,
+		MaxTTL:      *dnsMaxTTL,
+	})
+	log.Printf("DNS: upstream %s, кеш %d записей", up, *dnsCache)
+
 	cfg := server.Config{
 		Listen:        *listen,
 		Authority:     *authority,
 		ConnectIPPath: "/connect-ip",
+		Resolver:      resolver,
+		DNSPath:       "/dns-query",
 		TLS:           tlsConf,
 		Assign:        []netip.Prefix{pfx},
 		Routes: []connectip.IPRoute{
@@ -70,6 +96,26 @@ func main() {
 		log.Fatalf("run: %v", err)
 	}
 	log.Print("остановлен")
+}
+
+// parseUpstream разбирает адрес upstream-DNS: схема выбирает транспорт (arch —
+// «DNS, DoT, DoH на выбор»).
+func parseUpstream(s string) (dns.Upstream, error) {
+	switch {
+	case strings.HasPrefix(s, "https://"):
+		return dns.NewDoH(s), nil
+	case strings.HasPrefix(s, "tls://"):
+		addr := strings.TrimPrefix(s, "tls://")
+		host, _, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, fmt.Errorf("tls:// ждёт host:port: %w", err)
+		}
+		return dns.NewDoT(addr, host), nil
+	case strings.HasPrefix(s, "udp://"):
+		return dns.NewPlain(strings.TrimPrefix(s, "udp://")), nil
+	default:
+		return nil, fmt.Errorf("неизвестная схема %q (нужно https://, tls:// или udp://)", s)
+	}
 }
 
 // loadTLS берёт серт из файлов (реальный домен) или генерит self-signed (dev).

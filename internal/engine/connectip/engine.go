@@ -21,6 +21,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	quic "github.com/quic-go/quic-go"
+
 	"quicdiver/internal/engine"
 	"quicdiver/internal/guard"
 	"quicdiver/internal/packet"
@@ -78,9 +80,15 @@ func (e *Engine) logStats(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			log.Printf("stats out: recv=%d tunnel=%d bypass=%d oversize=%d writeErr=%d | in: recv=%d inject=%d inErr=%d",
+			dgRcvd, dgDropped := quic.DatagramStats()
+			var lossPct float64
+			if tot := dgRcvd + dgDropped; tot > 0 {
+				lossPct = float64(dgDropped) * 100 / float64(tot)
+			}
+			log.Printf("stats out: recv=%d tunnel=%d bypass=%d oversize=%d writeErr=%d | in: recv=%d inject=%d inErr=%d | datagram: rcvd=%d DROPPED=%d (%.2f%%)",
 				e.cOutRecv.Load(), e.cToTunnel.Load(), e.cBypass.Load(), e.cOversize.Load(), e.cWriteErr.Load(),
-				e.cInRecv.Load(), e.cInject.Load(), e.cInErr.Load())
+				e.cInRecv.Load(), e.cInject.Load(), e.cInErr.Load(),
+				dgRcvd, dgDropped, lossPct)
 		}
 	}
 }

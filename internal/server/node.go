@@ -58,10 +58,10 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("listen udp: %w", err)
 	}
 	defer udp.Close()
-	// Крупные UDP-буферы против потерь датаграмм при всплесках (ОС урежет до
-	// net.core.rmem_max/wmem_max — поднять sysctl на узле).
-	_ = udp.SetReadBuffer(8 << 20)
-	_ = udp.SetWriteBuffer(8 << 20)
+	// UDP-буферы: покрыть BDP с запасом, но НЕ раздувать — длинная очередь даёт
+	// bufferbloat (RTT под нагрузкой растёт). ОС урежет до net.core.rmem_max.
+	_ = udp.SetReadBuffer(2 << 20)
+	_ = udp.SetWriteBuffer(2 << 20)
 
 	tmpl := Template(cfg.Authority, cfg.ConnectIPPath)
 	proxy := &connectip.Proxy{}

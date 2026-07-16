@@ -19,3 +19,5 @@ require (
 	golang.org/x/text v0.38.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 )
+
+replace github.com/quic-go/quic-go => ./third_party/quic-go

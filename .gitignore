@@ -19,3 +19,6 @@ config.local.*
 
 # go
 /vendor/
+
+# пропатченный quic-go (восстанавливается scripts/setup-third-party.sh)
+/third_party/

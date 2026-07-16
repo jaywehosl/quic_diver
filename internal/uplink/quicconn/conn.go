@@ -28,10 +28,11 @@ const ALPN = "qd/1"
 // уточнения из DatagramTooLargeError (IPv6 min MTU 1280 минус заголовки).
 const defaultMaxDatagram = 1200
 
-// udpBufSize — размер буферов UDP-сокета. Малые буферы теряют датаграммы при
-// всплесках (для QUIC это потери → retransmit оригинального TCP). ОС может
-// урезать до системного лимита (Linux net.core.rmem_max/wmem_max).
-const udpBufSize = 8 << 20
+// udpBufSize — размер буферов UDP-сокета. Слишком малые теряют датаграммы при
+// всплесках; слишком большие дают bufferbloat (очередь копится → RTT под
+// нагрузкой растёт). Ориентир — покрыть BDP (800Мбит×15мс ≈ 1.4МБ) с запасом,
+// не больше. ОС может урезать до системного лимита (Linux net.core.rmem_max).
+const udpBufSize = 2 << 20
 
 func setUDPBuffers(pc *net.UDPConn) {
 	_ = pc.SetReadBuffer(udpBufSize)

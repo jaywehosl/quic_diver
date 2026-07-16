@@ -11,6 +11,8 @@ import (
 	"context"
 	"flag"
 	"log"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 )
@@ -28,12 +30,18 @@ func main() {
 	flag.StringVar(&o.authority, "authority", "", "authority в connect-ip URI (по умолчанию = server)")
 	flag.StringVar(&o.dll, "dll", `C:\Users\jaywehosl\Downloads\WinDivert-2.2.2-A\x64\WinDivert.dll`, "путь к WinDivert.dll")
 	flag.BoolVar(&o.noProxy, "no-proxy", false, "не отключать системный прокси")
+	pprofAddr := flag.String("pprof", "", "адрес pprof (напр. localhost:6061); пусто → выкл")
 	flag.Parse()
 	if o.authority == "" {
 		o.authority = o.server
 	}
 
 	log.SetPrefix("qd-client: ")
+
+	if *pprofAddr != "" {
+		go func() { log.Printf("pprof: %v", http.ListenAndServe(*pprofAddr, nil)) }()
+		log.Printf("pprof включён на %s", *pprofAddr)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 

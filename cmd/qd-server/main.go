@@ -12,6 +12,8 @@ import (
 	"crypto/tls"
 	"flag"
 	"log"
+	"net/http"
+	_ "net/http/pprof"
 	"net/netip"
 	"os"
 	"os/signal"
@@ -28,9 +30,14 @@ func main() {
 	assign := flag.String("assign", "10.7.0.2/32", "адрес, назначаемый клиенту")
 	certFile := flag.String("cert", "", "TLS cert (PEM); пусто → self-signed dev")
 	keyFile := flag.String("key", "", "TLS key (PEM)")
+	pprofAddr := flag.String("pprof", "", "адрес pprof (напр. localhost:6060); пусто → выкл")
 	flag.Parse()
 
 	log.SetPrefix("qd-server: ")
+
+	if *pprofAddr != "" {
+		go func() { log.Printf("pprof: %v", http.ListenAndServe(*pprofAddr, nil)) }()
+	}
 
 	tlsConf, err := loadTLS(*certFile, *keyFile)
 	if err != nil {

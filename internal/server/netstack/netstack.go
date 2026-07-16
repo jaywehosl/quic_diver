@@ -33,8 +33,11 @@ import (
 )
 
 const (
-	nicID       = 1
-	channelMTU  = 1500
+	nicID = 1
+	// channelMTU занижен до 1280 (IPv6 min MTU): узел объявляет MSS ≤1240 и
+	// клиенту, и удалённым серверам, поэтому ни один сегмент не превышает ёмкость
+	// connect-ip датаграммы (QUIC datagram). Иначе крупные пакеты отбрасываются.
+	channelMTU  = 1280
 	maxInFlight = 2048
 	dialTimeout = 15 * time.Second
 )

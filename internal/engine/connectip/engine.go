@@ -17,6 +17,7 @@ import (
 	"encoding/binary"
 	"log"
 	"net/netip"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -30,10 +31,14 @@ import (
 // 1200 — консервативно с запасом; позже уточнять по MaxDatagramSize.
 const clampMSSValue = 1200
 
+// maxInboundBatch — сколько ответных пакетов копим перед одним Source.Send.
+const maxInboundBatch = 128
+
 // Engine — реализация модели B.
 type Engine struct {
 	guard    *guard.Guard
 	rewriter engine.Rewriter
+	bufPool  sync.Pool
 
 	// счётчики для диагностики
 	cOutRecv, cToTunnel, cBypass, cWriteErr, cOversize atomic.Uint64
@@ -43,7 +48,11 @@ type Engine struct {
 // New собирает движок с local-guard (nil → всё в туннель) и опциональным
 // rewriter (клиентский NAT; nil → без подмены адресов).
 func New(g *guard.Guard, rw engine.Rewriter) *Engine {
-	return &Engine{guard: g, rewriter: rw}
+	return &Engine{
+		guard:    g,
+		rewriter: rw,
+		bufPool:  sync.Pool{New: func() any { return make([]byte, 65600) }},
+	}
 }
 
 // Run запускает оба насоса и завершается по отмене ctx или первой ошибке.
@@ -126,30 +135,91 @@ func (e *Engine) pumpOutbound(ctx context.Context, src packet.Source, tun engine
 	}
 }
 
+// pumpInbound: ответы из туннеля → стек ОС. Чтение (по одному, ограничение
+// connect-ip) отделено от инжекта, который батчится — один Source.Send на пачку
+// пакетов вместо syscall на каждый (главный выигрыш входящей скорости).
 func (e *Engine) pumpInbound(ctx context.Context, src packet.Source, tun engine.PacketTunnel, errc chan<- error) {
-	buf := make([]byte, 65600)
+	ch := make(chan []byte, 2048)
+	go e.inboundReader(ctx, tun, ch, errc)
+
+	batch := make([]packet.Packet, 0, maxInboundBatch)
+	bufs := make([][]byte, 0, maxInboundBatch)
 	for {
+		var first []byte
+		select {
+		case <-ctx.Done():
+			return
+		case d, ok := <-ch:
+			if !ok {
+				return
+			}
+			first = d
+		}
+
+		batch = batch[:0]
+		bufs = bufs[:0]
+		e.prepInbound(first, &batch)
+		bufs = append(bufs, first)
+	drain:
+		for len(batch) < maxInboundBatch {
+			select {
+			case d, ok := <-ch:
+				if !ok {
+					break drain
+				}
+				e.prepInbound(d, &batch)
+				bufs = append(bufs, d)
+			default:
+				break drain
+			}
+		}
+
+		if len(batch) > 0 {
+			if err := src.Send(batch); err != nil {
+				e.cInErr.Add(1)
+			} else {
+				e.cInject.Add(uint64(len(batch)))
+			}
+		}
+		for _, b := range bufs {
+			e.bufPool.Put(b[:cap(b)])
+		}
+	}
+}
+
+// inboundReader читает пакеты из туннеля в буферы из пула и шлёт в канал.
+func (e *Engine) inboundReader(ctx context.Context, tun engine.PacketTunnel, ch chan<- []byte, errc chan<- error) {
+	defer close(ch)
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		buf := e.bufPool.Get().([]byte)
 		n, err := tun.ReadPacket(buf)
 		if err != nil {
 			errc <- err
 			return
 		}
 		if n == 0 {
+			e.bufPool.Put(buf)
 			continue
 		}
 		e.cInRecv.Add(1)
-		data := make([]byte, n)
-		copy(data, buf[:n])
-		if e.rewriter != nil {
-			e.rewriter.Inbound(data) // dst assigned→real
+		select {
+		case ch <- buf[:n]:
+		case <-ctx.Done():
+			return
 		}
-		clampMSS(data) // TCP SYN-ACK: ужать MSS под MTU туннеля
-		if err := src.Send([]packet.Packet{{Data: data, Dir: packet.Inbound}}); err != nil {
-			e.cInErr.Add(1)
-			continue
-		}
-		e.cInject.Add(1)
 	}
+}
+
+// prepInbound применяет NAT/clamp и добавляет пакет в батч на инжект.
+func (e *Engine) prepInbound(data []byte, batch *[]packet.Packet) {
+	if e.rewriter != nil {
+		e.rewriter.Inbound(data) // dst assigned→real
+	}
+	clampMSS(data) // TCP SYN-ACK: ужать MSS под MTU туннеля
+	*batch = append(*batch, packet.Packet{Data: data, Dir: packet.Inbound})
 }
 
 // clampMSS ужимает опцию MSS в TCP SYN/SYN-ACK до clampMSSValue (IPv4). Правит

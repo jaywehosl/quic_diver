@@ -89,18 +89,29 @@ func (s *Source) Recv(ctx context.Context) ([]packet.Packet, error) {
 	if err != nil {
 		return out, err
 	}
-	// Досчитать контрольные суммы (перехват до NIC-offload оставляет их неполными).
-	for i := range out {
-		calcChecksums(out[i].Data)
-	}
 	if n := len(out); n > 0 && out[n-1].IfIndex != 0 {
 		s.lastIfIdx = out[n-1].IfIndex // запомнить интерфейс для реинжекта ответов
 	}
 	return out, nil
 }
 
-// Send инжектит батч пакетов. Пакеты из туннеля (ответы) идут как inbound.
+// Send инжектит пакеты, разбивая на чанки ≤ BatchMax (лимит SendEx).
 func (s *Source) Send(pkts []packet.Packet) error {
+	for len(pkts) > 0 {
+		n := len(pkts)
+		if n > BatchMax {
+			n = BatchMax
+		}
+		if err := s.sendChunk(pkts[:n]); err != nil {
+			return err
+		}
+		pkts = pkts[n:]
+	}
+	return nil
+}
+
+// sendChunk инжектит один батч (≤ BatchMax). Ответы из туннеля идут как inbound.
+func (s *Source) sendChunk(pkts []packet.Packet) error {
 	if len(pkts) == 0 {
 		return nil
 	}
@@ -108,9 +119,6 @@ func (s *Source) Send(pkts []packet.Packet) error {
 	s.sendAddr = s.sendAddr[:0]
 	for i := range pkts {
 		p := &pkts[i]
-		if p.Dir == packet.Inbound {
-			calcChecksums(p.Data) // страховка после NAT-подмены адреса
-		}
 		s.sendBuf = append(s.sendBuf, p.Data...)
 		var a Address
 		a.SetLayer(LayerNetwork)
@@ -152,18 +160,53 @@ func splitBatch(buf []byte, addrs []Address, out []packet.Packet) ([]packet.Pack
 			break
 		}
 		a := &addrs[i]
+		pkt := buf[off : off+n]
+		if needsChecksum(a, pkt) {
+			calcChecksums(pkt) // досчитать только offloaded суммы (дорогой DLL-вызов)
+		}
 		dir := packet.Inbound
 		if a.Outbound() {
 			dir = packet.Outbound
 		}
 		out = append(out, packet.Packet{
-			Data:    buf[off : off+n],
+			Data:    pkt,
 			Dir:     dir,
 			IfIndex: a.IfIdx(),
 		})
 		off += n
 	}
 	return out, nil
+}
+
+// needsChecksum — true, если у пакета не досчитана хотя бы одна релевантная сумма
+// (NIC offload). Только тогда нужен дорогой пересчёт.
+func needsChecksum(a *Address, pkt []byte) bool {
+	if len(pkt) < 1 {
+		return false
+	}
+	v6 := pkt[0]>>4 == 6
+	if !v6 && !a.IPChecksumValid() {
+		return true
+	}
+	var proto byte
+	if v6 {
+		if len(pkt) < 40 {
+			return false
+		}
+		proto = pkt[6]
+	} else {
+		if len(pkt) < 20 {
+			return false
+		}
+		proto = pkt[9]
+	}
+	switch proto {
+	case 6:
+		return !a.TCPChecksumValid()
+	case 17:
+		return !a.UDPChecksumValid()
+	}
+	return false
 }
 
 // ipPacketLen возвращает полную длину IP-пакета из его заголовка.

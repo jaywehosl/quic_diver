@@ -76,6 +76,12 @@ func (a *Address) Loopback() bool { return a.word&(1<<18) != 0 }
 func (a *Address) Impostor() bool { return a.word&(1<<19) != 0 }
 func (a *Address) IPv6() bool     { return a.word&(1<<20) != 0 }
 
+// *ChecksumValid — досчитана ли соответствующая контрольная сумма. Если нет
+// (NIC offload на исходящих), её надо пересчитать перед туннелированием.
+func (a *Address) IPChecksumValid() bool  { return a.word&(1<<21) != 0 }
+func (a *Address) TCPChecksumValid() bool { return a.word&(1<<22) != 0 }
+func (a *Address) UDPChecksumValid() bool { return a.word&(1<<23) != 0 }
+
 // SetOutbound управляет флагом направления (нужно при инжекте ответных пакетов).
 func (a *Address) SetOutbound(v bool) {
 	if v {
@@ -229,7 +235,7 @@ func closeHandle(h windows.Handle) error {
 // ICMP). Нужно для перехваченных исходящих пакетов: их L4-суммы часто не досчитаны
 // из-за NIC checksum offload, и удалённый стек их отбросит.
 func calcChecksums(pkt []byte) {
-	if len(pkt) == 0 {
+	if len(pkt) == 0 || procCalcChecks == nil {
 		return
 	}
 	procCalcChecks.Call(

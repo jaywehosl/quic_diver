@@ -28,6 +28,16 @@ const ALPN = "qd/1"
 // уточнения из DatagramTooLargeError (IPv6 min MTU 1280 минус заголовки).
 const defaultMaxDatagram = 1200
 
+// udpBufSize — размер буферов UDP-сокета. Малые буферы теряют датаграммы при
+// всплесках (для QUIC это потери → retransmit оригинального TCP). ОС может
+// урезать до системного лимита (Linux net.core.rmem_max/wmem_max).
+const udpBufSize = 8 << 20
+
+func setUDPBuffers(pc *net.UDPConn) {
+	_ = pc.SetReadBuffer(udpBufSize)
+	_ = pc.SetWriteBuffer(udpBufSize)
+}
+
 // transportSocket — пара «транспорт + его сокет» для одного сетевого пути.
 type transportSocket struct {
 	tr *quic.Transport
@@ -92,6 +102,7 @@ func (c *Conn) Migrate(ctx context.Context, laddr *net.UDPAddr) error {
 	if err != nil {
 		return err
 	}
+	setUDPBuffers(pc)
 	newTr := &quic.Transport{Conn: pc}
 
 	path, err := c.qc.AddPath(newTr)
@@ -162,6 +173,7 @@ func (d Dialer) Dial(ctx context.Context, endpoint string) (uplink.Conn, error) 
 	if err != nil {
 		return nil, err
 	}
+	setUDPBuffers(pc)
 	tr := &quic.Transport{Conn: pc}
 
 	qc, err := tr.Dial(ctx, raddr, ensureALPN(d.TLS), configOrDefault(d.QUIC))

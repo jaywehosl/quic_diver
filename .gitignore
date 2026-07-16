@@ -1,0 +1,21 @@
+# build
+/bin/
+/dist/
+*.exe
+*.dll
+*.sys
+*.test
+*.out
+
+# state / secrets
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+/data/
+*.pem
+*.key
+config.local.*
+
+# go
+/vendor/

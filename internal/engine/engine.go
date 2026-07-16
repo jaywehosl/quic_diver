@@ -1,27 +1,32 @@
-// Package engine — модель обработки трафика (data-path).
+// Package engine — модель обработки трафика клиента (data-path).
 //
-// Engine — единственная точка, где живёт развилка A/B. Всё под ним (packet.Source,
-// uplink.Conn) — общее. Смена модели = смена реализации Engine, остальной код не
-// трогается.
+// Engine — единственная точка развилки A/B. Под ним всё общее (packet.Source,
+// PacketTunnel). Смена модели = смена реализации Engine.
 //
-//	Модель B (connectip): passthrough — сырые IP-пакеты из Source заворачиваются
-//	   в connect-ip датаграммы Conn; ответы разворачиваются и реинжектятся. gVisor
-//	   на клиенте не нужен. Выбрана как основная.
-//	Модель A (l4quic, позже): терминация TCP/UDP в gVisor на клиенте, per-flow
-//	   потоки/датаграммы. Даёт клиентский per-flow роутинг/статистику даром ценой
-//	   overhead. Добавляется отдельной реализацией Engine.
+//	Модель B (connectip): passthrough — сырые IP из Source заворачиваются в
+//	   connect-ip (PacketTunnel), ответы реинжектятся в стек ОС. gVisor на клиенте
+//	   нет. Выбрана как основная.
+//	Модель A (позже): терминация TCP/UDP в gVisor на клиенте, per-flow потоки.
+//	   Отдельная реализация Engine поверх тех же Source и транспорта.
 package engine
 
 import (
 	"context"
 
 	"quicdiver/internal/packet"
-	"quicdiver/internal/uplink"
 )
 
-// Engine гоняет трафик между локальным источником пакетов и uplink до узла.
+// PacketTunnel — двусторонний канал сырых IP-пакетов до узла (клиентская
+// сторона). cip.Client удовлетворяет: WritePacket отправляет IP-пакет в туннель
+// (и может вернуть готовый ICMP при oversize), ReadPacket читает ответный IP.
+type PacketTunnel interface {
+	WritePacket(b []byte) (icmp []byte, err error)
+	ReadPacket(b []byte) (int, error)
+}
+
+// Engine гоняет трафик между локальным источником пакетов и туннелем до узла.
 type Engine interface {
 	// Run обрабатывает трафик до отмены ctx или фатальной ошибки.
 	// Реализация многопоточна по умолчанию (arch6).
-	Run(ctx context.Context, src packet.Source, up uplink.Conn) error
+	Run(ctx context.Context, src packet.Source, tun PacketTunnel) error
 }

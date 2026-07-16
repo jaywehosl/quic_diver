@@ -16,7 +16,6 @@ import (
 
 	"quicdiver/internal/engine/connectip"
 	"quicdiver/internal/guard"
-	"quicdiver/internal/routing"
 )
 
 func main() {
@@ -30,12 +29,13 @@ func main() {
 	defer stop()
 
 	g := guard.New(nil) // IP узлов добавятся после резолва конфига
-	eng := connectip.New(g, routing.Default{})
+	eng := connectip.New(g)
 
-	// TODO(quicdiver): открыть packet.Source (WinDivert/TUN) и uplink.Conn,
-	// затем eng.Run(ctx, src, up). Сейчас — только каркас wiring.
+	// TODO(quicdiver): sysproxy off → открыть packet.Source (WinDivert) и
+	// cip.Client (PacketTunnel), затем eng.Run(ctx, src, client); при выходе —
+	// sysproxy restore. Сейчас — только каркас wiring.
 	_ = eng
-	log.Print("каркас: захват и uplink ещё не подключены")
+	log.Print("каркас: захват и туннель ещё не подключены")
 
 	<-ctx.Done()
 	log.Print("остановка")

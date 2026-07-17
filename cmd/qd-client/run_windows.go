@@ -104,7 +104,8 @@ func run(ctx context.Context, o options) error {
 	tlsConf := &tls.Config{InsecureSkipVerify: true, ServerName: host} // dev self-signed
 	tmpl := server.Template(o.authority, "/connect-ip")
 
-	client, rsp, err := cip.Dial(ctx, o.server, tmpl, tlsConf)
+	authURL := "https://" + o.authority + "/qd-auth"
+	client, rsp, err := cip.DialAuth(ctx, o.server, tmpl, tlsConf, o.token, authURL)
 	if err != nil {
 		return fmt.Errorf("connect-ip dial: %w", err)
 	}

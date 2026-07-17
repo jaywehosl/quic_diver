@@ -16,6 +16,7 @@ package cip
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"net"
 	"net/http"
 	"net/netip"
@@ -24,6 +25,7 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	"github.com/yosida95/uritemplate/v3"
 
+	"quicdiver/internal/server/auth"
 	"quicdiver/internal/uplink/quicconn"
 )
 
@@ -45,6 +47,17 @@ func (c *Client) H3Conn() *http3.ClientConn { return c.cc }
 //   - tmpl: URI Template connect-ip эндпоинта на узле;
 //   - tlsConf: TLS клиента (ALPN дополняется h3; должен нести ServerName).
 func Dial(ctx context.Context, endpoint string, tmpl *uritemplate.Template, tlsConf *tls.Config) (*Client, *http.Response, error) {
+	return DialAuth(ctx, endpoint, tmpl, tlsConf, "", "")
+}
+
+// DialAuth — Dial с авторизацией: token предъявляется узлу по authURL до
+// connect-ip, помечая QUIC-сессию доверенной. Пустой token/authURL → без auth
+// (dev-узел без БД).
+//
+// Авторизуем сессию до connect-ip намеренно: connect-ip-go не даёт положить
+// заголовок в свой запрос, а так проверка идёт один раз на всю сессию, и туннель
+// с CONNECT-стримами внутри неё наследуют доверие.
+func DialAuth(ctx context.Context, endpoint string, tmpl *uritemplate.Template, tlsConf *tls.Config, token, authURL string) (*Client, *http.Response, error) {
 	qcAny, err := quicconn.Dialer{TLS: ensureH3(tlsConf)}.Dial(ctx, endpoint)
 	if err != nil {
 		return nil, nil, err
@@ -54,6 +67,18 @@ func Dial(ctx context.Context, endpoint string, tmpl *uritemplate.Template, tlsC
 	h3tr := &http3.Transport{EnableDatagrams: true}
 	cc := h3tr.NewClientConn(qc.QUIC())
 
+	// Авторизуемся, если задан authURL — независимо от того, пуст ли токен.
+	// Узел без БД (dev) ответит 204 и на пустой; узел с БД пустой/битый токен
+	// отклонит (decoy), и мы упадём здесь с понятной ошибкой, а не позже на кривой
+	// капсуле connect-ip.
+	if authURL != "" {
+		if err := authorize(ctx, cc, token, authURL); err != nil {
+			h3tr.Close()
+			qc.Close()
+			return nil, nil, err
+		}
+	}
+
 	ipConn, rsp, err := connectip.Dial(ctx, cc, tmpl)
 	if err != nil {
 		h3tr.Close()
@@ -61,6 +86,25 @@ func Dial(ctx context.Context, endpoint string, tmpl *uritemplate.Template, tlsC
 		return nil, nil, err
 	}
 	return &Client{qc: qc, h3: h3tr, cc: cc, ip: ipConn}, rsp, nil
+}
+
+// authorize предъявляет токен узлу и ждёт 204. Не признав токен, узел отвечает
+// decoy-страницей (200 с HTML) — по коду и отличаем принятие от отказа.
+func authorize(ctx context.Context, cc *http3.ClientConn, token, authURL string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, authURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set(auth.HeaderToken, token)
+	rsp, err := cc.RoundTrip(req)
+	if err != nil {
+		return fmt.Errorf("авторизация: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("авторизация отклонена узлом (токен неверен или отозван)")
+	}
+	return nil
 }
 
 // WritePacket отправляет сырой IP-пакет в туннель. Если пакет превышает путь,

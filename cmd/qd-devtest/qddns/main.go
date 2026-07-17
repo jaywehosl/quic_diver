@@ -26,6 +26,7 @@ func main() {
 	v6 := flag.Bool("aaaa", false, "спрашивать AAAA (IPv6) вместо A")
 	listen := flag.String("listen", "", "поднять локальный DNS-listener на этом адресе и ждать (напр. 127.0.0.1:5353); проверка боевого пути без прав админа")
 	withNAT46 := flag.Bool("nat46", false, "включить синтез A для v6-only хостов (как в бою)")
+	token := flag.String("token", "", "токен доступа к узлу (для узла с БД)")
 	flag.Parse()
 
 	timeout := 25 * time.Second
@@ -36,8 +37,9 @@ func main() {
 	defer cancel()
 
 	host, _, _ := net.SplitHostPort(*srv)
-	client, _, err := cip.Dial(ctx, *srv, server.Template(*authority, "/connect-ip"),
-		&tls.Config{InsecureSkipVerify: true, ServerName: host})
+	client, _, err := cip.DialAuth(ctx, *srv, server.Template(*authority, "/connect-ip"),
+		&tls.Config{InsecureSkipVerify: true, ServerName: host},
+		*token, "https://"+*authority+"/qd-auth")
 	if err != nil {
 		log.Fatalf("cip.Dial: %v", err)
 	}

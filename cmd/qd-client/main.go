@@ -26,6 +26,7 @@ type options struct {
 	noProxy     bool   // не трогать системный прокси
 	noDNS       bool   // не поднимать локальный резолвер и не трогать системный DNS
 	nat46       string // синтез A для v6-only хостов: auto|on|off
+	token       string // токен доступа к узлу (пусто → dev-узел без БД)
 	hybrid      bool   // TCP через CONNECT-стрим, UDP датаграммами
 	recvWorkers int    // потоков захвата (1 — сохраняет порядок пакетов)
 	mtu         int    // MTU локального стека (≤ MTU интерфейса; PPPoE обычно 1480)
@@ -40,6 +41,7 @@ func main() {
 	flag.BoolVar(&o.noProxy, "no-proxy", false, "не отключать системный прокси")
 	flag.BoolVar(&o.noDNS, "no-dns", false, "не поднимать локальный резолвер (резолв пойдёт мимо туннеля — провайдер подменит ответы)")
 	flag.StringVar(&o.nat46, "nat46", "auto", "давать IPv6-only хостам фиктивный IPv4: auto (только если своего IPv6 нет), on, off")
+	flag.StringVar(&o.token, "token", "", "токен доступа к узлу (пусто → узел без БД, dev)")
 	flag.BoolVar(&o.hybrid, "hybrid", true, "TCP через надёжный CONNECT-стрим, UDP датаграммами (false → всё датаграммами, модель B)")
 	flag.IntVar(&o.recvWorkers, "recv-workers", 1, "потоков захвата: 1 сохраняет порядок пакетов; >1 ускоряет скачивание ценой reordering")
 	flag.IntVar(&o.mtu, "mtu", 1500, "MTU локального стека; инжект идёт в интерфейс (у него обычно 1500), а не в PPPoE-путь")

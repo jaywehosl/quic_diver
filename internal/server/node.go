@@ -23,6 +23,8 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	"github.com/yosida95/uritemplate/v3"
 
+	"quicdiver/internal/server/auth"
+	"quicdiver/internal/server/db"
 	"quicdiver/internal/server/decoy"
 	"quicdiver/internal/server/dns"
 	"quicdiver/internal/server/netstack"
@@ -52,6 +54,12 @@ type Config struct {
 	DNSPath string
 	// DNSGCEvery — период мягкой очистки кеша (протухшее). 0 → минута.
 	DNSGCEvery time.Duration
+	// Store — хранилище токенов. nil → узел открыт (dev): любой клиент проходит.
+	// В бою обязателен, иначе туннель — открытый прокси.
+	Store db.Store
+	// AuthPath — путь эндпоинта авторизации сессии, обычно "/qd-auth". Клиент
+	// предъявляет туда токен до connect-ip; сессия помечается доверенной.
+	AuthPath string
 }
 
 // Template строит URI Template connect-ip эндпоинта. Клиент и узел обязаны
@@ -85,11 +93,44 @@ func Run(ctx context.Context, cfg Config) error {
 	// DoH (RFC 8484) в том же HTTP/3-соединении, что и туннель: DNS клиента едет
 	// внутри QUIC, провайдеру его не видно и подменить нечего.
 	if cfg.Resolver != nil && cfg.DNSPath != "" {
-		mux.Handle(cfg.DNSPath, dns.Handler(cfg.Resolver))
+		doh := dns.Handler(cfg.Resolver)
+		mux.Handle(cfg.DNSPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// DNS — только для своих: иначе узел станет открытым DoH-резолвером.
+			if !sessionAllowed(r.Context(), cfg) {
+				decoy.Handler().ServeHTTP(w, r)
+				return
+			}
+			doh.ServeHTTP(w, r)
+		}))
 		go cfg.Resolver.RunGC(ctx, cfg.DNSGCEvery)
 		log.Printf("DoH на %s", cfg.DNSPath)
 	}
+	// Авторизация сессии: клиент предъявляет токен ДО connect-ip. Проверяем один
+	// раз на QUIC-сессию — connect-ip и все CONNECT-стримы идут по ней же и
+	// наследуют доверие. Нет/битый токен → decoy (не 401 — не выдавать себя).
+	if cfg.AuthPath != "" {
+		mux.HandleFunc(cfg.AuthPath, func(w http.ResponseWriter, r *http.Request) {
+			// Узел без БД (dev) открыт — принимаем любую сессию. Иначе проверяем
+			// токен; нет/битый/отозван → decoy (не 401, не выдавать себя).
+			if cfg.Store == nil {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			sess := auth.SessionFrom(r.Context())
+			tok := auth.TokenFromRequest(r)
+			if sess == nil || tok == "" || !authorize(r.Context(), cfg, sess, tok) {
+				decoy.Handler().ServeHTTP(w, r)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		})
+	}
+
 	mux.HandleFunc(cfg.ConnectIPPath, func(w http.ResponseWriter, r *http.Request) {
+		if !sessionAllowed(r.Context(), cfg) {
+			decoy.Handler().ServeHTTP(w, r)
+			return
+		}
 		req, err := connectip.ParseRequest(r, tmpl)
 		if err != nil {
 			// не валидный connect-ip запрос → decoy, не выдавать себя
@@ -116,6 +157,12 @@ func Run(ctx context.Context, cfg Config) error {
 		isPlainConnect := r.Method == http.MethodConnect &&
 			r.URL != nil && r.URL.Path == "" && r.Host != ""
 		if isPlainConnect {
+			// CONNECT-стрим идёт по уже авторизованной сессии; если нет — рвём
+			// (decoy бессмыслен для authority-form, снаружи это просто отказ).
+			if !sessionAllowed(r.Context(), cfg) {
+				w.WriteHeader(http.StatusProxyAuthRequired)
+				return
+			}
 			serveConnect(w, r, cfg)
 			return
 		}
@@ -126,6 +173,12 @@ func Run(ctx context.Context, cfg Config) error {
 		Handler:         handler,
 		EnableDatagrams: true,
 		TLSConfig:       cfg.TLS,
+		// Вешаем свежую auth-сессию на каждое QUIC-соединение: значение доходит до
+		// всех его хендлеров (request ctx наследует conn ctx), поэтому проверять
+		// токен достаточно один раз, а не на каждом стриме.
+		ConnContext: func(ctx context.Context, _ *quic.Conn) context.Context {
+			return auth.NewSessionContext(ctx)
+		},
 		QUICConfig: &quic.Config{
 			// В гибриде КАЖДЫЙ TCP-флоу клиента — отдельный CONNECT-стрим, а
 			// браузер с мессенджером легко держат сотни соединений. Дефолт
@@ -154,6 +207,30 @@ func Run(ctx context.Context, cfg Config) error {
 		srv.Close()
 	}()
 	return srv.Serve(udp)
+}
+
+// authorize проверяет предъявленный токен по БД и, если он живой, помечает
+// сессию доверенной. Возвращает false молча — вызывающий покажет decoy.
+func authorize(ctx context.Context, cfg Config, sess *auth.Session, token string) bool {
+	if cfg.Store == nil {
+		return false
+	}
+	info, err := cfg.Store.Lookup(ctx, auth.Hash(token))
+	if err != nil {
+		return false // нет токена, отозван или ошибка БД — не пускаем
+	}
+	sess.Authorize(info.Role, auth.Hash(token))
+	return true
+}
+
+// sessionAllowed — доверенная ли текущая сессия. Если Store не задан (dev-режим,
+// узел открыт), пускаем всех — так локальный e2e работает без БД.
+func sessionAllowed(ctx context.Context, cfg Config) bool {
+	if cfg.Store == nil {
+		return true
+	}
+	sess := auth.SessionFrom(ctx)
+	return sess != nil && sess.Authorized()
 }
 
 // serveConnect обслуживает CONNECT-туннель одного TCP-флоу: соединяется с

@@ -25,6 +25,8 @@ import (
 	connectip "github.com/quic-go/connect-ip-go"
 
 	"quicdiver/internal/server"
+	"quicdiver/internal/server/auth"
+	"quicdiver/internal/server/db"
 	"quicdiver/internal/server/dns"
 	"quicdiver/internal/server/netstack"
 )
@@ -43,9 +45,22 @@ func main() {
 	dnsMinTTL := flag.Duration("dns-min-ttl", 5*time.Second, "не кешировать короче")
 	dnsMaxTTL := flag.Duration("dns-max-ttl", time.Hour, "не кешировать дольше")
 	dnsGC := flag.Duration("dns-gc", time.Minute, "период мягкой очистки кеша (выброс протухшего)")
+	dbPath := flag.String("db", "", "файл БД токенов (пусто → узел ОТКРЫТ, любой клиент проходит — только для dev)")
+	adminToken := flag.String("admin-token", "", "admin-токен сети из деплоя: его хеш кладётся в БД (пусто → не трогать)")
+	nodeToken := flag.String("node-token", "", "node-токен этого узла из деплоя: его хеш кладётся в БД (пусто → не трогать)")
+	addUser := flag.Bool("add-user", false, "сгенерировать клиентский токен, записать в БД и выйти (нужен -db)")
+	userLabel := flag.String("label", "", "имя клиента для -add-user")
 	flag.Parse()
 
 	log.SetPrefix("qd-server: ")
+
+	// Управляющие команды (генерация токенов) — заготовка кнопок будущей панели.
+	if *addUser {
+		if err := cmdAddUser(*dbPath, *userLabel); err != nil {
+			log.Fatalf("add-user: %v", err)
+		}
+		return
+	}
 
 	if *pprofAddr != "" {
 		go func() { log.Printf("pprof: %v", http.ListenAndServe(*pprofAddr, nil)) }()
@@ -74,6 +89,27 @@ func main() {
 	})
 	log.Printf("DNS: upstream %s, кеш %d записей", up, *dnsCache)
 
+	// БД токенов. Пусто → узел открыт (dev/e2e). В бою обязательна: иначе туннель
+	// — открытый прокси.
+	var store *db.SQLite
+	if *dbPath != "" {
+		store, err = db.Open(*dbPath)
+		if err != nil {
+			log.Fatalf("db: %v", err)
+		}
+		defer store.Close()
+		// Секреты сети из деплой-параметров → хеши в БД. Открытый секрет в БД не
+		// попадает; при репликации хеши разнесутся по узлам сети (arch2).
+		seedNetworkToken(store, *adminToken, auth.RoleAdmin)
+		seedNetworkToken(store, *nodeToken, auth.RoleNode)
+		if counts, err := store.CountByRole(context.Background()); err == nil {
+			log.Printf("БД: %s (user=%d admin=%d node=%d)", *dbPath,
+				counts[auth.RoleUser], counts[auth.RoleAdmin], counts[auth.RoleNode])
+		}
+	} else {
+		log.Print("ВНИМАНИЕ: -db не задан — узел ОТКРЫТ, авторизации нет (только dev)")
+	}
+
 	cfg := server.Config{
 		Listen:        *listen,
 		Authority:     *authority,
@@ -81,6 +117,8 @@ func main() {
 		Resolver:      resolver,
 		DNSPath:       "/dns-query",
 		DNSGCEvery:    *dnsGC,
+		AuthPath:      "/qd-auth",
+		Store:         storeOrNil(store),
 		TLS:           tlsConf,
 		Assign:        []netip.Prefix{pfx},
 		Routes: []connectip.IPRoute{
@@ -98,6 +136,50 @@ func main() {
 		log.Fatalf("run: %v", err)
 	}
 	log.Print("остановлен")
+}
+
+// storeOrNil отдаёт nil-интерфейс, если БД нет: server.Config.Store — интерфейс,
+// а типизированный nil-указатель в нём != nil и сломал бы проверку «узел открыт».
+func storeOrNil(s *db.SQLite) db.Store {
+	if s == nil {
+		return nil
+	}
+	return s
+}
+
+// seedNetworkToken кладёт хеш admin/node-секрета из деплой-параметров в БД. Сам
+// секрет в БД не хранится — только хеш, поэтому утечка реплики его не выдаёт.
+func seedNetworkToken(store *db.SQLite, token string, role auth.Role) {
+	if token == "" {
+		return
+	}
+	if err := store.PutToken(context.Background(), auth.Hash(token), role, string(role)+"-сети"); err != nil {
+		log.Fatalf("seed %s: %v", role, err)
+	}
+}
+
+// cmdAddUser генерирует клиентский токен, пишет его хеш в БД и печатает открытый
+// токен ОДИН раз. Заготовка кнопки «добавить клиента» будущей веб-панели.
+func cmdAddUser(dbPath, label string) error {
+	if dbPath == "" {
+		return fmt.Errorf("нужен -db")
+	}
+	store, err := db.Open(dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+
+	token, err := auth.Generate()
+	if err != nil {
+		return err
+	}
+	if err := store.PutToken(context.Background(), auth.Hash(token), auth.RoleUser, label); err != nil {
+		return err
+	}
+	fmt.Printf("клиентский токен создан (показывается один раз):\n\n  %s\n\n", token)
+	fmt.Printf("метка: %q\nв БД лежит только хеш; передайте токен клиенту флагом -token.\n", label)
+	return nil
 }
 
 // parseUpstream разбирает адрес upstream-DNS: схема выбирает транспорт (arch —

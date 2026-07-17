@@ -1,26 +1,21 @@
 // Package db — персистентное хранилище узла.
 //
-// Движок — SQLite (один файл): бэкап = копия файла, редеплой = restore (arch3).
-// После миграции узла на новую VM с тем же доменом восстановленная БД возвращает
-// клиентские токены/сессии — клиенты переподключаются после обновления A-записи,
-// ничего не меняя у себя.
-//
-// Хранит: пользователей и их токены; правила маршрутизации и аутбаунды цепочки;
-// реестр узлов сети; сессии и статистику (HWID/IP/использование).
-//
-// TODO(quicdiver): реализация на database/sql + драйвер SQLite (кандидат
-// modernc.org/sqlite — чистый Go, без cgo, удобно для кросс-сборки узла).
+// Реализация — SQLite (sqlite.go). Этот файл держит контракт: слои узла зависят
+// от интерфейса, а не от движка, чтобы его можно было подменить (напр. на
+// реплицируемый бэкенд) без правок вызывающих.
 package db
+
+import "context"
 
 // Store — контракт хранилища узла.
 type Store interface {
-	// Backup делает целостный снапшот БД в файл dst (arch3).
-	Backup(dst string) error
-	// Restore восстанавливает БД из файла src (arch3).
-	Restore(src string) error
+	// Lookup — роль токена по хешу (горячий путь авторизации). Отозванный токен
+	// возвращает ErrNotFound.
+	Lookup(ctx context.Context, hash string) (TokenInfo, error)
+	// Assignment — адрес, назначенный клиенту (пустой + ErrNotFound, если нет).
+	Assignment(ctx context.Context, hash string) (string, error)
 	// Close закрывает хранилище.
 	Close() error
-
-	// TODO(quicdiver): методы Users/Tokens, RoutingRules/Outbounds,
-	// Nodes, Sessions/Stats — по мере реализации серверной части.
 }
+
+var _ Store = (*SQLite)(nil)

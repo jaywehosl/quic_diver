@@ -17,6 +17,8 @@ import (
 	"quicdiver/internal/client/dnsproxy"
 	"quicdiver/internal/client/nat"
 	"quicdiver/internal/client/nat46"
+	"quicdiver/internal/client/netwatch"
+	"quicdiver/internal/client/supervisor"
 	"quicdiver/internal/client/sysdns"
 	"quicdiver/internal/client/sysproxy"
 	"quicdiver/internal/engine/connectip"
@@ -29,6 +31,13 @@ import (
 )
 
 func run(ctx context.Context, o options) error {
+	// 0. Подобрать DNS, если прошлый запуск умер аварийно. Строго ДО резолва
+	//    домена узла: в реестре сейчас может стоять наш 127.0.0.1, а listener'а за
+	//    ним нет — резолв не отработает и клиент не поднимется вовсе.
+	if !o.noDNS {
+		recoverDNS()
+	}
+
 	// 1. Определить реальный исходящий адрес и IP узла (до перехвата).
 	realIP, err := primaryIP()
 	if err != nil {
@@ -132,6 +141,32 @@ func run(ctx context.Context, o options) error {
 		defer stopDNS()
 	}
 
+	// 6.7. Supervisor (arch4): переезд Wi-Fi↔LTE или пересборка PPPoE меняет
+	//      локальный адрес — переносим сессию на новый сокет, чтобы соединения
+	//      приложений не рвались, и пересматриваем зависящее от сети.
+	sup := supervisor.New(supervisor.Config{
+		Client:  client,
+		Watch:   netwatch.Watcher{HasIPv6: nat46.HostHasIPv6},
+		Initial: netwatch.State{Primary: realIP, HasIPv6: nat46.HostHasIPv6()},
+		OnNetworkChange: func(st netwatch.State) error {
+			// У нового адаптера свой DHCP-DNS — снова уводим его на наш listener.
+			// Apply идемпотентен: уже наши значения он не перезапишет.
+			if o.noDNS {
+				return nil
+			}
+			if _, err := sysdns.Apply(); err != nil {
+				return fmt.Errorf("вернуть системный DNS на loopback: %w", err)
+			}
+			return nil
+		},
+	})
+	go sup.Run(ctx)
+	defer func() {
+		if m, f := sup.Stats(); m > 0 || f > 0 {
+			log.Printf("supervisor: переездов пережито %d, неудачных миграций %d", m, f)
+		}
+	}()
+
 	// 7. Гибрид: TCP-флоу терминирует локальный gVisor и уводит в надёжный
 	//    CONNECT-стрим (потери туннеля закрывает ретрансмит QUIC); UDP остаётся на
 	//    датаграммах connect-ip. Замерено: TCP-стрим 494 Мбит/stddev 9% против
@@ -157,6 +192,28 @@ func run(ctx context.Context, o options) error {
 	eng := connectip.New(g, rewriter)
 	log.Print("проксирование запущено (модель B: всё датаграммами)")
 	return eng.Run(ctx, src, client)
+}
+
+// recoverDNS возвращает системный резолвер, если прошлый запуск умер аварийно
+// (паника, kill, BSOD — defer не отработал) и оставил в реестре наш loopback.
+//
+// Подбираем, только если 127.0.0.1:53 свободен: занятый порт означает, что рядом
+// работает другой экземпляр, и откат сорвал бы ему резолв.
+func recoverDNS() {
+	probe, err := net.ListenPacket("udp", net.JoinHostPort(sysdns.Loopback4, "53"))
+	if err != nil {
+		return // порт занят — другой экземпляр уже держит DNS на себе
+	}
+	probe.Close()
+
+	found, err := sysdns.RestoreStale()
+	if err != nil {
+		log.Printf("dns: не подобрать состояние прошлого запуска: %v", err)
+		return
+	}
+	if found {
+		log.Print("DNS: прошлый запуск завершился аварийно — прежний резолвер возвращён")
+	}
 }
 
 // setupNAT46 решает, включать ли синтез A для v6-only хостов.
@@ -204,14 +261,6 @@ func startDNS(ctx context.Context, cc *http3.ClientConn, authority string, v6 *n
 			log.Printf("dns listener: %v", err)
 		}
 	}()
-
-	// Порт уже наш — значит другого экземпляра нет и осиротевший от прошлого
-	// падения DNS можно спокойно подобрать.
-	if found, err := sysdns.RestoreStale(); err != nil {
-		log.Printf("dns: не подобрать состояние прошлого запуска: %v", err)
-	} else if found {
-		log.Print("DNS: прошлый запуск завершился аварийно — прежний резолвер возвращён")
-	}
 
 	saved, err := sysdns.Apply()
 	if err != nil {

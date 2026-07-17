@@ -39,10 +39,15 @@ func setUDPBuffers(pc *net.UDPConn) {
 	_ = pc.SetWriteBuffer(udpBufSize)
 }
 
-// transportSocket — пара «транспорт + его сокет» для одного сетевого пути.
+// retiredBufSize — до скольки урезать буферы покинутого сокета (см. retire).
+const retiredBufSize = 4 << 10
+
+// transportSocket — «транспорт + сокет + путь» для одного сетевого пути.
+// path == nil у исходного пути: он создан через Dial, объекта Path у него нет.
 type transportSocket struct {
-	tr *quic.Transport
-	pc net.PacketConn
+	tr   *quic.Transport
+	pc   net.PacketConn
+	path *quic.Path
 }
 
 // Conn — одна QUIC-сессия до узла.
@@ -52,7 +57,8 @@ type Conn struct {
 	mu       sync.Mutex
 	tr       *quic.Transport   // активный транспорт (сокет текущего пути)
 	pc       net.PacketConn    // сокет активного пути
-	prev     []transportSocket // старые пути после миграции, живут до Close
+	path     *quic.Path        // путь активного транспорта (nil у исходного)
+	prev     []transportSocket // покинутые пути: живут до Close, но разоружены
 	remote   net.Addr
 	maxDgram atomic.Int64
 }
@@ -123,16 +129,41 @@ func (c *Conn) Migrate(ctx context.Context, laddr *net.UDPAddr) error {
 	}
 
 	c.mu.Lock()
-	c.prev = append(c.prev, transportSocket{tr: c.tr, pc: c.pc})
-	c.tr, c.pc = newTr, pc
+	old := transportSocket{tr: c.tr, pc: c.pc, path: c.path}
+	c.prev = append(c.prev, old)
+	c.tr, c.pc, c.path = newTr, pc, path
 	c.mu.Unlock()
 
-	// ВНИМАНИЕ: старый транспорт НЕ закрываем здесь — Transport.Close() рвёт все
-	// свои соединения, включая нашу (только что мигрировавшую) сессию. Держим его
-	// в c.prev, пока жива Conn.
-	// TODO(quicdiver): grace-освобождение старых путей (ретайр connID + close по
-	// таймеру), иначе при частой миграции на мобильном копятся сокеты (arch4).
+	c.retire(old)
 	return nil
+}
+
+// retire разоружает путь, с которого мы ушли.
+//
+// Закрыть его нельзя: Transport.Close() рвёт ВСЕ соединения своего транспорта —
+// включая ту самую сессию, которую мы только что перевезли (проверено тестом:
+// после закрытия сессия отдаёт «transport closed»). Отвязать сессию от транспорта
+// quic-go v0.60 не позволяет, поэтому сокет живёт до конца сессии.
+//
+// Но держать на нём буферы незачем: их 2 МБ на сокет (см. udpBufSize), а на
+// мобильном за поездку набегают десятки переездов — это сотни мегабайт в ядре ни
+// за чем. Поэтому урезаем буферы до минимума: память возвращается, сокет и его
+// читающая горутина остаются (несколько КБ на путь).
+//
+// Path.Close() дополнительно говорит quic-go больше этот путь не использовать.
+// У исходного пути (из Dial) объекта Path нет — он просто остаётся простаивать.
+func (c *Conn) retire(old transportSocket) {
+	if old.path != nil {
+		// активный путь закрыть нельзя, но этот уже покинут — ошибка тут означала
+		// бы, что переключение не состоялось
+		if err := old.path.Close(); err != nil {
+			return
+		}
+	}
+	if pc, ok := old.pc.(*net.UDPConn); ok {
+		_ = pc.SetReadBuffer(retiredBufSize)
+		_ = pc.SetWriteBuffer(retiredBufSize)
+	}
 }
 
 // Close закрывает сессию и все транспорты (активный + оставшиеся от миграций).

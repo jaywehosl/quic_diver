@@ -196,3 +196,30 @@ func TestDoHHandler(t *testing.T) {
 }
 
 func bytesReader(b []byte) *bytes.Reader { return bytes.NewReader(b) }
+
+// Мягкая очистка должна работать по таймеру, а не только существовать в API:
+// иначе протухшие записи занимают место до вытеснения по LRU и выдавливают живые.
+func TestGCEvictsExpired(t *testing.T) {
+	up := &fakeUpstream{ttl: 3600, ip: [4]byte{1, 1, 1, 1}}
+	r := New(Config{Upstream: up, CacheSize: 100, TTLOverride: 20 * time.Millisecond})
+
+	if _, err := r.Query(context.Background(), query(t, "gc.example.", 1)); err != nil {
+		t.Fatal(err)
+	}
+	if size, _, _ := r.Cache().Stats(); size != 1 {
+		t.Fatalf("запись не закеширована: size=%d", size)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go r.RunGC(ctx, 10*time.Millisecond)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if size, _, _ := r.Cache().Stats(); size == 0 {
+			return // GC выбросил протухшее
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("GC не выбросил протухшую запись — очистка мертва")
+}

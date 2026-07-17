@@ -42,6 +42,7 @@ func main() {
 	dnsTTL := flag.Duration("dns-ttl", 0, "принудительный TTL кеша (0 — брать из ответа)")
 	dnsMinTTL := flag.Duration("dns-min-ttl", 5*time.Second, "не кешировать короче")
 	dnsMaxTTL := flag.Duration("dns-max-ttl", time.Hour, "не кешировать дольше")
+	dnsGC := flag.Duration("dns-gc", time.Minute, "период мягкой очистки кеша (выброс протухшего)")
 	flag.Parse()
 
 	log.SetPrefix("qd-server: ")
@@ -79,6 +80,7 @@ func main() {
 		ConnectIPPath: "/connect-ip",
 		Resolver:      resolver,
 		DNSPath:       "/dns-query",
+		DNSGCEvery:    *dnsGC,
 		TLS:           tlsConf,
 		Assign:        []netip.Prefix{pfx},
 		Routes: []connectip.IPRoute{

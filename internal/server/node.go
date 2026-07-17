@@ -50,6 +50,8 @@ type Config struct {
 	Resolver *dns.Resolver
 	// DNSPath — путь DoH-эндпоинта (RFC 8484), обычно "/dns-query".
 	DNSPath string
+	// DNSGCEvery — период мягкой очистки кеша (протухшее). 0 → минута.
+	DNSGCEvery time.Duration
 }
 
 // Template строит URI Template connect-ip эндпоинта. Клиент и узел обязаны
@@ -84,6 +86,7 @@ func Run(ctx context.Context, cfg Config) error {
 	// внутри QUIC, провайдеру его не видно и подменить нечего.
 	if cfg.Resolver != nil && cfg.DNSPath != "" {
 		mux.Handle(cfg.DNSPath, dns.Handler(cfg.Resolver))
+		go cfg.Resolver.RunGC(ctx, cfg.DNSGCEvery)
 		log.Printf("DoH на %s", cfg.DNSPath)
 	}
 	mux.HandleFunc(cfg.ConnectIPPath, func(w http.ResponseWriter, r *http.Request) {

@@ -46,6 +46,27 @@ func New(cfg Config) *Resolver {
 // Cache — доступ к кешу (статистика и очистка из админки).
 func (r *Resolver) Cache() *Cache { return r.cache }
 
+// RunGC периодически делает мягкую очистку и блокируется до отмены ctx.
+//
+// Без неё протухшие записи занимают место до вытеснения по LRU: на редко
+// спрашиваемых именах кеш держится полным из мусора, а живые записи вылетают
+// раньше времени. Грубая очистка (FlushAll) остаётся ручной — она для админки.
+func (r *Resolver) RunGC(ctx context.Context, every time.Duration) {
+	if every <= 0 {
+		every = time.Minute
+	}
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			r.cache.FlushExpired()
+		}
+	}
+}
+
 // Query резолвит DNS-сообщение в проводном формате.
 func (r *Resolver) Query(ctx context.Context, query []byte) ([]byte, error) {
 	var p dnsmessage.Parser

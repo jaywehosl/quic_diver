@@ -96,6 +96,18 @@ func (c *Conn) MaxDatagramSize() int {
 	return defaultMaxDatagram
 }
 
+// Traffic — счётчики пакетов сессии. По ним видно «мы шлём, а в ответ тишина»:
+// именно так выглядит слетевший NAT-маппинг, когда сессия формально ещё жива.
+type Traffic struct {
+	Sent, Received uint64
+}
+
+// Traffic отдаёт текущие счётчики.
+func (c *Conn) Traffic() Traffic {
+	st := c.qc.ConnectionStats()
+	return Traffic{Sent: st.PacketsSent, Received: st.PacketsReceived}
+}
+
 // QUIC возвращает нижележащее *quic.Conn для слоёв поверх (http3/connect-ip).
 // Миграция (Migrate) работает на этом же объекте, поэтому слои сверху переживают
 // смену пути прозрачно — объект conn при миграции не пересоздаётся.
@@ -230,8 +242,17 @@ var _ uplink.Dialer = Dialer{}
 // авто-тюнинг, потолок оставляем близким к дефолту quic-go.
 func DefaultConfig() *quic.Config {
 	return &quic.Config{
-		EnableDatagrams:                true,
-		MaxIdleTimeout:                 30 * time.Second,
+		EnableDatagrams: true,
+		// Idle держим долгим намеренно: обрыв между роутером и провайдером (пересборка
+		// PPPoE, моргнувшая LTE) длится десятки секунд, и всё это время сессию
+		// убивать нельзя — иначе оборвутся все TCP приложений, хотя чинить нечего:
+		// вернётся связь, и QUIC доедет сам. Мёртвый путь мы замечаем не по этому
+		// таймауту, а по тишине в приёме (supervisor.watchPath), и чиним переездом
+		// на новый порт за один RTT. Таймаут остаётся последней сеткой — на случай,
+		// когда починить не вышло вовсе.
+		MaxIdleTimeout: 90 * time.Second,
+		// Keep-alive заметно короче типичного NAT-таймаута (30-60 с): молчащий
+		// маппинг роутер выбрасывает, и путь ломался бы на ровном месте.
 		KeepAlivePeriod:                15 * time.Second,
 		InitialStreamReceiveWindow:     2 << 20, // ~1.5x BDP
 		MaxStreamReceiveWindow:         6 << 20, // дефолт quic-go

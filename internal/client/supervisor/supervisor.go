@@ -19,6 +19,7 @@ import (
 	"errors"
 	"log"
 	"net"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -28,12 +29,18 @@ import (
 // ErrSessionDead — сессия умерла и миграцией не спасается: нужен новый туннель.
 var ErrSessionDead = errors.New("supervisor: QUIC-сессия мертва")
 
-// Migrator — то, что умеет перенести сессию на новый локальный сокет и сказать,
-// жива ли она. Реализуется cip.Client.
+// Migrator — то, что умеет перенести сессию на новый локальный сокет, сказать,
+// жива ли она, и показать счётчики трафика. Реализуется cip.Client.
+//
+// Счётчики отдаются примитивами, а не своим типом: иначе транспортному слою
+// пришлось бы импортировать supervisor, то есть зависеть от того, кто им рулит.
 type Migrator interface {
 	Migrate(ctx context.Context, laddr *net.UDPAddr) error
 	// Context закрывается, когда сессия умерла (idle-таймаут, CONNECTION_CLOSE).
 	Context() context.Context
+	// Traffic — пакетов отправлено и принято: по ним видно, что ответы перестали
+	// приходить, хотя мы продолжаем слать.
+	Traffic() (sent, received uint64)
 }
 
 // Config — параметры supervisor'а.
@@ -50,21 +57,56 @@ type Config struct {
 	OnNetworkChange func(netwatch.State) error
 	// MigrateTimeout — сколько ждать валидации нового пути. 0 → 10s.
 	MigrateTimeout time.Duration
+
+	// ProbeEvery — как часто сверять счётчики трафика. 0 → DefaultProbeEvery.
+	ProbeEvery time.Duration
+	// SilenceLimit — сколько терпеть тишину в приёме, пока сами продолжаем слать,
+	// прежде чем счесть путь мёртвым. 0 → DefaultSilenceLimit.
+	SilenceLimit time.Duration
+	// RepairEvery — пауза между попытками починки, пока путь не ожил.
+	// 0 → DefaultRepairEvery.
+	RepairEvery time.Duration
+	// LocalAddr — с какого локального адреса переезжать при починке.
+	// nil → текущий исходящий адрес машины.
+	LocalAddr func() (netip.Addr, error)
 }
+
+// Пороги детекта мёртвого пути.
+//
+// SilenceLimit должен быть заметно больше keep-alive-периода (15 с): в простое
+// стороны молчат, и тишина сама по себе не беда. Признак беды — тишина в приёме
+// при том, что мы продолжаем слать (в простое это keep-alive PING, на который
+// обязан прийти ответ).
+const (
+	DefaultProbeEvery   = time.Second
+	DefaultSilenceLimit = 20 * time.Second
+	DefaultRepairEvery  = 3 * time.Second
+)
 
 // Supervisor следит за сетью и переносит сессию.
 type Supervisor struct {
 	cfg Config
 
-	mu         sync.Mutex
-	migrations int
-	failures   int
+	mu          sync.Mutex
+	migrations  int
+	failures    int
+	repairs     int
+	repairFails int
 }
 
 // New создаёт supervisor.
 func New(cfg Config) *Supervisor {
 	if cfg.MigrateTimeout == 0 {
 		cfg.MigrateTimeout = 10 * time.Second
+	}
+	if cfg.ProbeEvery == 0 {
+		cfg.ProbeEvery = DefaultProbeEvery
+	}
+	if cfg.SilenceLimit == 0 {
+		cfg.SilenceLimit = DefaultSilenceLimit
+	}
+	if cfg.RepairEvery == 0 {
+		cfg.RepairEvery = DefaultRepairEvery
 	}
 	return &Supervisor{cfg: cfg}
 }
@@ -80,6 +122,7 @@ func New(cfg Config) *Supervisor {
 func (s *Supervisor) Run(ctx context.Context) error {
 	ch := make(chan netwatch.State, 1)
 	go s.cfg.Watch.Run(ctx, s.cfg.Initial, ch)
+	go s.watchPath(ctx) // мёртвый путь при неизменном адресе — самый частый обрыв
 
 	dead := deadChan(s.cfg.Client)
 	for {
@@ -112,6 +155,14 @@ func (s *Supervisor) Stats() (migrations, failures int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.migrations, s.failures
+}
+
+// RepairStats — сколько раз чинили мёртвый путь и сколько попыток не удалось
+// (пока сеть не вернулась, неудачи — норма).
+func (s *Supervisor) RepairStats() (repairs, failed int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.repairs, s.repairFails
 }
 
 func (s *Supervisor) handle(ctx context.Context, st netwatch.State) {

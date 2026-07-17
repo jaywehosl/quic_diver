@@ -134,8 +134,13 @@ func Run(ctx context.Context, cfg Config) error {
 			// «интернет упал».
 			MaxIncomingStreams: 4096,
 			EnableDatagrams:    true,
-			MaxIdleTimeout:     30 * time.Second,
-			KeepAlivePeriod:    15 * time.Second,
+			// Idle согласуем с клиентом (см. quicconn.DefaultConfig): у клиента
+			// связь рвётся между его роутером и провайдером на десятки секунд, и
+			// сессию всё это время убивать нельзя — иначе оборвутся все TCP
+			// приложений. Стороны берут минимум из двух значений, поэтому короткий
+			// таймаут здесь обесценил бы длинный у клиента.
+			MaxIdleTimeout:  90 * time.Second,
+			KeepAlivePeriod: 15 * time.Second,
 			// Окна чуть выше BDP и не больше — см. quicconn.DefaultConfig:
 			// раздутые окна дают bufferbloat (RTT p95 3.4 с, throughput ×5 вниз).
 			InitialStreamReceiveWindow:     2 << 20,

@@ -52,6 +52,8 @@ func (s *spyMigrator) Migrate(_ context.Context, laddr *net.UDPAddr) error {
 	return err
 }
 
+func (s *spyMigrator) Traffic() (uint64, uint64) { return 0, 0 }
+
 func (s *spyMigrator) seen() []netip.Addr {
 	s.mu.Lock()
 	defer s.mu.Unlock()

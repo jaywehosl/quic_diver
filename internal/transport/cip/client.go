@@ -84,6 +84,13 @@ func (c *Client) Migrate(ctx context.Context, laddr *net.UDPAddr) error {
 // По нему supervisor понимает, что путь мёртв и туннель надо поднимать заново.
 func (c *Client) Context() context.Context { return c.qc.QUIC().Context() }
 
+// Traffic — пакетов отправлено и принято: по ним supervisor замечает мёртвый путь
+// раньше idle-таймаута.
+func (c *Client) Traffic() (sent, received uint64) {
+	t := c.qc.Traffic()
+	return t.Sent, t.Received
+}
+
 // Close закрывает туннель и весь стек под ним.
 func (c *Client) Close() error {
 	err := c.ip.Close()

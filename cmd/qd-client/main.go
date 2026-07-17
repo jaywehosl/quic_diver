@@ -33,15 +33,35 @@ type options struct {
 	brutalMbps  int    // congestion: слать с этой полосой, игнорируя потери (0 — Cubic)
 }
 
+// Встроенные параметры для «боевой» сборки: задаются линковщиком
+//
+//	-ldflags "-X main.builtinServer=host:port -X main.builtinToken=qd_..."
+//
+// Тогда .exe запускается двойным кликом без флагов и сам идёт на нужный узел.
+// Пустые (обычная dev-сборка) — работают штатные флаги и дефолты.
+var (
+	builtinServer    string
+	builtinAuthority string
+	builtinToken     string
+)
+
 func main() {
+	// Боевая сборка сама поднимается с правами администратора (WinDivert грузит
+	// драйвер): при двойном клике без elevation перезапускаемся через UAC.
+	if builtinServer != "" {
+		ensureElevated()
+	}
+
+	defServer := firstNonEmpty(builtinServer, "localhost:8443")
+
 	var o options
-	flag.StringVar(&o.server, "server", "localhost:8443", "endpoint узла (host:port)")
-	flag.StringVar(&o.authority, "authority", "", "authority в connect-ip URI (по умолчанию = server)")
+	flag.StringVar(&o.server, "server", defServer, "endpoint узла (host:port)")
+	flag.StringVar(&o.authority, "authority", builtinAuthority, "authority в connect-ip URI (по умолчанию = server)")
 	flag.StringVar(&o.dll, "dll", "", "путь к WinDivert.dll (пусто → вшитый распакуется в %APPDATA%\\QUICDiver)")
 	flag.BoolVar(&o.noProxy, "no-proxy", false, "не отключать системный прокси")
 	flag.BoolVar(&o.noDNS, "no-dns", false, "не поднимать локальный резолвер (резолв пойдёт мимо туннеля — провайдер подменит ответы)")
 	flag.StringVar(&o.nat46, "nat46", "auto", "давать IPv6-only хостам фиктивный IPv4: auto (только если своего IPv6 нет), on, off")
-	flag.StringVar(&o.token, "token", "", "токен доступа к узлу (пусто → узел без БД, dev)")
+	flag.StringVar(&o.token, "token", builtinToken, "токен доступа к узлу (пусто → узел без БД, dev)")
 	flag.BoolVar(&o.hybrid, "hybrid", true, "TCP через надёжный CONNECT-стрим, UDP датаграммами (false → всё датаграммами, модель B)")
 	flag.IntVar(&o.recvWorkers, "recv-workers", 1, "потоков захвата: 1 сохраняет порядок пакетов; >1 ускоряет скачивание ценой reordering")
 	flag.IntVar(&o.mtu, "mtu", 1500, "MTU локального стека; инжект идёт в интерфейс (у него обычно 1500), а не в PPPoE-путь")
@@ -50,6 +70,10 @@ func main() {
 	flag.Parse()
 	if o.authority == "" {
 		o.authority = o.server
+	}
+
+	if o.server != "" && o.token != "" {
+		log.Printf("боевой режим: узел %s (токен вшит)", o.server)
 	}
 
 	log.SetPrefix("qd-client: ")
@@ -68,8 +92,22 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
+	// Боевая сборка без консоли (двойной клик) — задержать окно на выходе, иначе
+	// пользователь не увидит причину, если узел недоступен.
+	if builtinServer != "" {
+		defer holdOnExit()
+	}
+
 	serve(ctx, o)
 	log.Print("остановлен")
+}
+
+// firstNonEmpty возвращает первый непустой аргумент.
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }
 
 // Границы паузы между попытками переподключения.

@@ -26,3 +26,6 @@ config.local.*
 # WinDivert вшивается в .exe (нужен в репо, несмотря на *.dll/*.sys выше)
 !internal/packet/windivert/assets/WinDivert.dll
 !internal/packet/windivert/assets/WinDivert64.sys
+
+# боевой клиент с вшитым токеном — секрет, не в git
+live-on-tests/*.exe

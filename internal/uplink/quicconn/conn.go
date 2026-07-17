@@ -126,17 +126,19 @@ func (c *Conn) Migrate(ctx context.Context, laddr *net.UDPAddr) error {
 
 	path, err := c.qc.AddPath(newTr)
 	if err != nil {
+		// AddPath не удался — сессия в этот транспорт не попала, закрывать безопасно
 		newTr.Close()
 		return err
 	}
+	// С этого момента сессия зарегистрирована в newTr, и закрывать его нельзя:
+	// Transport.Close() делает destroy всем своим соединениям, то есть убьёт ту
+	// самую сессию, которую мы переносим. Откатываемся через abandon.
 	if err := path.Probe(ctx); err != nil {
-		path.Close()
-		newTr.Close()
+		c.abandon(newTr, pc, path)
 		return err
 	}
 	if err := path.Switch(); err != nil {
-		path.Close()
-		newTr.Close()
+		c.abandon(newTr, pc, path)
 		return err
 	}
 
@@ -148,6 +150,33 @@ func (c *Conn) Migrate(ctx context.Context, laddr *net.UDPAddr) error {
 
 	c.retire(old)
 	return nil
+}
+
+// abandon откатывает неудавшийся переезд, не тронув сессию.
+//
+// Закрыть транспорт нельзя (destroy убьёт сессию), поэтому путь бросаем, сокет
+// разоружаем и держим до Close. Это цена попытки: при мёртвой сети supervisor
+// пробует чинить раз в несколько секунд, и каждая неудача оставляет сокет — но
+// разоружённый он стоит килобайты, а не мегабайты буферов.
+//
+// Раньше здесь стоял newTr.Close(), и первая же неудачная попытка обрывала
+// связь: сессия умирала с «transport closed» вместо того, чтобы дождаться
+// возврата сети.
+func (c *Conn) abandon(tr *quic.Transport, pc net.PacketConn, path *quic.Path) {
+	_ = path.Close()
+	disarm(pc)
+	c.mu.Lock()
+	c.prev = append(c.prev, transportSocket{tr: tr, pc: pc, path: path})
+	c.mu.Unlock()
+}
+
+// disarm урезает буферы сокета, который больше не нужен: память ядра
+// возвращается, сам сокет остаётся жить до конца сессии.
+func disarm(pc net.PacketConn) {
+	if u, ok := pc.(*net.UDPConn); ok {
+		_ = u.SetReadBuffer(retiredBufSize)
+		_ = u.SetWriteBuffer(retiredBufSize)
+	}
 }
 
 // retire разоружает путь, с которого мы ушли.
@@ -172,10 +201,7 @@ func (c *Conn) retire(old transportSocket) {
 			return
 		}
 	}
-	if pc, ok := old.pc.(*net.UDPConn); ok {
-		_ = pc.SetReadBuffer(retiredBufSize)
-		_ = pc.SetWriteBuffer(retiredBufSize)
-	}
+	disarm(old.pc)
 }
 
 // Close закрывает сессию и все транспорты (активный + оставшиеся от миграций).
@@ -243,14 +269,20 @@ var _ uplink.Dialer = Dialer{}
 func DefaultConfig() *quic.Config {
 	return &quic.Config{
 		EnableDatagrams: true,
-		// Idle держим долгим намеренно: обрыв между роутером и провайдером (пересборка
-		// PPPoE, моргнувшая LTE) длится десятки секунд, и всё это время сессию
-		// убивать нельзя — иначе оборвутся все TCP приложений, хотя чинить нечего:
-		// вернётся связь, и QUIC доедет сам. Мёртвый путь мы замечаем не по этому
-		// таймауту, а по тишине в приёме (supervisor.watchPath), и чиним переездом
-		// на новый порт за один RTT. Таймаут остаётся последней сеткой — на случай,
-		// когда починить не вышло вовсе.
-		MaxIdleTimeout: 90 * time.Second,
+		// Idle — компромисс между двумя видами обрыва.
+		//
+		// Короткий (роутер пересобрал PPPoE за десяток секунд): сессию убивать
+		// нельзя — оборвались бы все TCP приложений, хотя связь вот-вот вернётся и
+		// QUIC доедет сам. Значит таймаут должен быть заметно больше типичного
+		// обрыва.
+		//
+		// Длинный (сети нет минуту и дольше): держать мёртвую сессию незачем —
+		// починить её нечем. Каждый переезд требует нового connection ID, а выдаёт
+		// их узел по сети, которой нет; запас конечен и после него не помогает даже
+		// вернувшаяся связь. Спасает только новый туннель, а чтобы его поднять,
+		// сессия должна сперва умереть. Значит таймаут должен быть и не слишком
+		// большим: всё это время пользователь сидит без интернета, который уже есть.
+		MaxIdleTimeout: 45 * time.Second,
 		// Keep-alive заметно короче типичного NAT-таймаута (30-60 с): молчащий
 		// маппинг роутер выбрасывает, и путь ломался бы на ровном месте.
 		KeepAlivePeriod:                15 * time.Second,

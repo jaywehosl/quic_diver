@@ -40,6 +40,7 @@ func (s *Supervisor) watchPath(ctx context.Context) {
 		lastSent, lastRecv uint64
 		silentSince        time.Time
 		lastRepair         time.Time
+		tries              int // попыток за текущий обрыв
 		started            bool
 	)
 	for {
@@ -63,6 +64,7 @@ func (s *Supervisor) watchPath(ctx context.Context) {
 					time.Since(silentSince).Round(time.Second))
 			}
 			silentSince = time.Time{}
+			tries = 0 // обрыв кончился: следующему дать полный запас попыток
 		case sent > lastSent:
 			// шлём, а в ответ ничего: либо сеть лежит, либо маппинг слетел
 			if silentSince.IsZero() {
@@ -79,7 +81,14 @@ func (s *Supervisor) watchPath(ctx context.Context) {
 		if time.Since(lastRepair) < s.cfg.RepairEvery {
 			continue // не долбить: сеть могла ещё не подняться
 		}
+		if s.cfg.MaxRepairs >= 0 && tries >= s.cfg.MaxRepairs {
+			// Запас connection ID кончился бы, а без них переезд невозможен даже
+			// после возврата связи. Дальше не мешаем: сессия умрёт по
+			// idle-таймауту, и туннель поднимут заново — редайлу ID не нужны.
+			continue
+		}
 		lastRepair = time.Now()
+		tries++
 		s.repair(ctx)
 	}
 }
@@ -103,8 +112,12 @@ func (s *Supervisor) repair(ctx context.Context) {
 	s.mu.Unlock()
 
 	if err != nil {
-		// Обычное дело, пока сеть не вернулась: путь не подтверждается. Молчим,
-		// чтобы не сорить в лог каждые несколько секунд, — итог виден в Stats.
+		// Пока сеть не вернулась, неудача — норма. Но совсем молчать нельзя: если
+		// починка не срабатывает по другой причине (например, узел не даёт новых
+		// connection ID), это единственный след. Первые попытки и дальше изредка.
+		if n := s.repairFailsSnapshot(); n <= 2 || n%10 == 0 {
+			log.Printf("supervisor: починка пути не удалась (%d-я): %v", n, err)
+		}
 		return
 	}
 	log.Printf("supervisor: путь был мёртв — переехали на новый порт с %s, связь восстановлена", addr)
@@ -121,4 +134,11 @@ func (s *Supervisor) localAddr() (netip.Addr, error) {
 		return netip.Addr{}, err
 	}
 	return st.Primary, nil
+}
+
+// repairFailsSnapshot — сколько починок уже не удалось.
+func (s *Supervisor) repairFailsSnapshot() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.repairFails
 }

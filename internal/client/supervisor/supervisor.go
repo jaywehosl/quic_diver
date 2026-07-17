@@ -69,6 +69,9 @@ type Config struct {
 	// LocalAddr — с какого локального адреса переезжать при починке.
 	// nil → текущий исходящий адрес машины.
 	LocalAddr func() (netip.Addr, error)
+	// MaxRepairs — сколько попыток починки делать за один обрыв. 0 →
+	// DefaultMaxRepairs, отрицательное — без предела (тесты).
+	MaxRepairs int
 }
 
 // Пороги детекта мёртвого пути.
@@ -77,10 +80,21 @@ type Config struct {
 // стороны молчат, и тишина сама по себе не беда. Признак беды — тишина в приёме
 // при том, что мы продолжаем слать (в простое это keep-alive PING, на который
 // обязан прийти ответ).
+//
+// MaxRepairs мал не из осторожности, а по устройству QUIC: каждый новый путь
+// требует свежий connection ID, а выдаёт их узел — по сети, которой сейчас нет.
+// Запас конечен (RFC 9000 §5.1.1, active_connection_id_limit), и каждая неудачная
+// попытка сжигает один ID безвозвратно. Исчерпав их, мы теряем возможность
+// переехать вообще: PATH_CHALLENGE отправить не на чем, и починка не сработает
+// даже когда связь вернётся (проверено на живом узле: попытки продолжали падать
+// уже при живой сети). Поэтому пробуем несколько раз — этого хватает на реальную
+// причину миграции, слетевший NAT-маппинг при живой сети, — а дальше не мешаем
+// сессии умереть: редайл поднимет туннель заново и connection ID ему не нужны.
 const (
 	DefaultProbeEvery   = time.Second
 	DefaultSilenceLimit = 20 * time.Second
 	DefaultRepairEvery  = 3 * time.Second
+	DefaultMaxRepairs   = 2
 )
 
 // Supervisor следит за сетью и переносит сессию.
@@ -107,6 +121,9 @@ func New(cfg Config) *Supervisor {
 	}
 	if cfg.RepairEvery == 0 {
 		cfg.RepairEvery = DefaultRepairEvery
+	}
+	if cfg.MaxRepairs == 0 {
+		cfg.MaxRepairs = DefaultMaxRepairs
 	}
 	return &Supervisor{cfg: cfg}
 }

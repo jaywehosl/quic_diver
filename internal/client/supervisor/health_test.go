@@ -230,3 +230,86 @@ func TestSilenceResetsWhenTrafficReturns(t *testing.T) {
 		t.Fatalf("путь ожил сам, но починка всё равно сделана %d раз", n)
 	}
 }
+
+// Попытки починки ограничены, и это не косметика: каждый переезд требует свежего
+// connection ID от узла, а он их шлёт по сети, которой во время обрыва нет. Запас
+// конечен, и, сжигая его вслепую, мы теряем возможность переехать совсем — даже
+// когда связь вернулась (замерено на живом узле). Лучше остановиться и дать
+// сессии умереть: редайл поднимет туннель без всяких connection ID.
+func TestRepairAttemptsAreCapped(t *testing.T) {
+	f := &fakeSession{migErr: errors.New("path validation timeout")}
+
+	s := New(Config{
+		Client:       f,
+		LocalAddr:    fixedAddr(),
+		ProbeEvery:   2 * time.Millisecond,
+		SilenceLimit: 5 * time.Millisecond,
+		RepairEvery:  5 * time.Millisecond,
+		MaxRepairs:   3,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+	go s.watchPath(ctx)
+
+	go func() {
+		tk := time.NewTicker(2 * time.Millisecond)
+		defer tk.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tk.C:
+				f.sent.Add(1) // шлём, ответов нет — сеть лежит долго
+			}
+		}
+	}()
+	<-ctx.Done()
+
+	if n := f.migrations(); n != 3 {
+		t.Fatalf("попыток починки %d, ожидалось ровно 3: сверх лимита жжём connection ID", n)
+	}
+}
+
+// Обрыв кончился — запас попыток обязан вернуться: следующий обрыв должен лечиться
+// так же, а не упираться в исчерпанный счётчик прошлого.
+func TestRepairBudgetResetsAfterRecovery(t *testing.T) {
+	f := &fakeSession{migErr: errors.New("path validation timeout")}
+
+	s := New(Config{
+		Client:       f,
+		LocalAddr:    fixedAddr(),
+		ProbeEvery:   2 * time.Millisecond,
+		SilenceLimit: 5 * time.Millisecond,
+		RepairEvery:  5 * time.Millisecond,
+		MaxRepairs:   2,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	go s.watchPath(ctx)
+
+	silence := func() {
+		for i := 0; i < 30; i++ {
+			f.sent.Add(1)
+			time.Sleep(2 * time.Millisecond)
+		}
+	}
+	recover := func() {
+		for i := 0; i < 10; i++ {
+			f.sent.Add(1)
+			f.recv.Add(1)
+			time.Sleep(2 * time.Millisecond)
+		}
+	}
+
+	silence()
+	first := f.migrations()
+	if first == 0 {
+		t.Fatal("первый обрыв не лечили вовсе")
+	}
+	recover() // связь вернулась
+	silence() // новый обрыв
+
+	if second := f.migrations(); second <= first {
+		t.Fatalf("после восстановления запас попыток не вернулся: было %d, стало %d", first, second)
+	}
+}

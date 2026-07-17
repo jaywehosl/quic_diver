@@ -75,10 +75,12 @@ func main() {
 
 	log.Printf("РВУ ПУТЬ: глушу релей на %v (пакеты в никуда, адрес клиента прежний)", *outage)
 	r.kill()
+	killed := time.Now()
 
 	select {
 	case err := <-errc:
-		log.Fatalf("сессия умерла прямо во время обрыва: %v", err)
+		log.Fatalf("сессия умерла прямо во время обрыва через %v: %v (причина: %v)",
+			time.Since(killed).Round(time.Second), err, context.Cause(client.Context()))
 	case <-time.After(*outage):
 	}
 
@@ -106,7 +108,13 @@ func main() {
 		}
 		select {
 		case err := <-errc:
-			log.Fatalf("сессия умерла вместо восстановления: %v", err)
+			// Длинный обрыв: чинить сессию нечем (connection ID выдаёт узел, а
+			// сети не было), поэтому она умирает — и туннель поднимают заново.
+			// Это делает serve в боевом клиенте; здесь проверяем то же руками.
+			log.Printf("сессия умерла через %v после обрыва: %v — поднимаю туннель заново",
+				time.Since(killed).Round(time.Second), err)
+			redial(ctx, r.addr.String(), *authority, back)
+			return
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
@@ -217,4 +225,22 @@ func startRelay(ctx context.Context, upstream *net.UDPAddr) (*relay, error) {
 		cur.Close()
 	}()
 	return r, nil
+}
+
+// redial поднимает туннель заново — так поступает serve, когда сессию уже не
+// спасти. Меряем от возврата сети: пользователя интересует именно это время.
+func redial(ctx context.Context, endpoint, authority string, netBack time.Time) {
+	start := time.Now()
+	c, _, err := cip.Dial(ctx, endpoint, server.Template(authority, "/connect-ip"),
+		&tls.Config{InsecureSkipVerify: true, ServerName: authority})
+	if err != nil {
+		log.Fatalf("ПРОВАЛ: туннель не поднялся заново: %v", err)
+	}
+	defer c.Close()
+
+	if _, err := c.LocalPrefixes(ctx); err != nil {
+		log.Fatalf("ПРОВАЛ: туннель поднялся, но узел не отвечает: %v", err)
+	}
+	log.Printf("УСПЕХ: туннель поднят заново за %v (с момента возврата сети — %v)",
+		time.Since(start).Round(10*time.Millisecond), time.Since(netBack).Round(100*time.Millisecond))
 }

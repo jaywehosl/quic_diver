@@ -3,6 +3,7 @@ package quicconn_test
 import (
 	"context"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -166,4 +167,96 @@ func echo(t *testing.T, ctx context.Context, qc *quic.Conn, what string) {
 	if string(got) != what {
 		t.Fatalf("%s: пришло %q", what, got)
 	}
+}
+
+// Неудачная миграция (новый путь не подтвердился — сеть лежит) НЕ должна трогать
+// живую сессию.
+//
+// Ловушка: AddPath регистрирует сессию в новом транспорте, поэтому Transport.Close()
+// при откате делает ей destroy — то есть попытка починки убивает ровно то, что
+// чинила. Так supervisor и гробил связь: при мёртвой сети он зовёт починку каждые
+// несколько секунд, и первая же попытка обрывала сессию (замерено на живом узле:
+// «quic: transport closed» вместо ожидаемого idle-таймаута).
+func TestFailedMigrationKeepsSessionAlive(t *testing.T) {
+	serverTLS, clientTLS := selfSigned(t)
+	ln := startEcho(t, serverTLS)
+	defer ln.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Ходим к узлу через глушимый релей: так Probe провалится по-настоящему —
+	// сокет создастся, а ответа не будет. Мигрировать на несуществующий адрес
+	// нельзя: там падает bind, то есть до AddPath дело не доходит и ловушка
+	// не срабатывает.
+	relay, dead := startBlackholeRelay(t, ln.Addr().(*net.UDPAddr))
+
+	uc := dial(t, ctx, relay.String(), clientTLS)
+	defer uc.Close()
+	c := uc.(*quicconn.Conn)
+	echo(t, ctx, c.QUIC(), "до обрыва")
+
+	dead.Store(true) // связь пропала
+
+	mctx, mcancel := context.WithTimeout(ctx, 2*time.Second)
+	err := c.Migrate(mctx, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	mcancel()
+	if err == nil {
+		t.Fatal("миграция удалась, хотя связи нет")
+	}
+	t.Logf("миграция ожидаемо не удалась: %v", err)
+
+	dead.Store(false) // связь вернулась
+
+	// Главное: сессия обязана быть жива — чинить будем ещё много раз.
+	echo(t, ctx, c.QUIC(), "после неудачной попытки")
+	t.Log("сессия пережила неудачную миграцию")
+}
+
+// startBlackholeRelay поднимает UDP-форвардер до узла, который можно заглушить.
+func startBlackholeRelay(t *testing.T, upstream *net.UDPAddr) (*net.UDPAddr, *atomic.Bool) {
+	t.Helper()
+	front, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { front.Close(); back.Close() })
+
+	var dead atomic.Bool
+	var client atomic.Pointer[net.UDPAddr]
+
+	go func() {
+		buf := make([]byte, 2048)
+		for {
+			n, from, err := front.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			if dead.Load() {
+				continue
+			}
+			client.Store(from)
+			_, _ = back.WriteToUDP(buf[:n], upstream)
+		}
+	}()
+	go func() {
+		buf := make([]byte, 2048)
+		for {
+			n, _, err := back.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			if dead.Load() {
+				continue
+			}
+			if c := client.Load(); c != nil {
+				_, _ = front.WriteToUDP(buf[:n], c)
+			}
+		}
+	}()
+	return front.LocalAddr().(*net.UDPAddr), &dead
 }

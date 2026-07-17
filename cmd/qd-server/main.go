@@ -26,9 +26,11 @@ import (
 
 	"quicdiver/internal/server"
 	"quicdiver/internal/server/auth"
+	"quicdiver/internal/server/chain"
 	"quicdiver/internal/server/db"
 	"quicdiver/internal/server/dns"
 	"quicdiver/internal/server/netstack"
+	"quicdiver/internal/transport/cip"
 )
 
 func main() {
@@ -47,6 +49,9 @@ func main() {
 	dnsGC := flag.Duration("dns-gc", time.Minute, "период мягкой очистки кеша (выброс протухшего)")
 	dbPath := flag.String("db", "", "файл БД токенов (пусто → узел ОТКРЫТ, любой клиент проходит — только для dev)")
 	poolCIDR := flag.String("pool", "10.7.0.0/16", "пул адресов клиентов (IPv4); каждому токену — стабильный адрес")
+	upstreamAddr := flag.String("upstream", "", "выход через upstream-узел host:port (цепочка); пусто → direct")
+	upstreamAuthority := flag.String("upstream-authority", "", "authority upstream-узла (пусто → host из -upstream)")
+	upstreamToken := flag.String("upstream-token", "", "node-токен для upstream-узла")
 	adminToken := flag.String("admin-token", "", "admin-токен сети из деплоя: его хеш кладётся в БД (пусто → не трогать)")
 	nodeToken := flag.String("node-token", "", "node-токен этого узла из деплоя: его хеш кладётся в БД (пусто → не трогать)")
 	addUser := flag.Bool("add-user", false, "сгенерировать клиентский токен, записать в БД и выйти (нужен -db)")
@@ -133,11 +138,36 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
+	// Chain (arch): выход не в реальную сеть, а через upstream-узел. A предъявляет
+	// B node-токен и ходит CONNECT-стримами — так же, как клиент ходит к A.
+	if *upstreamAddr != "" {
+		upClient, err := dialUpstream(ctx, *upstreamAddr, *upstreamAuthority, *upstreamToken)
+		if err != nil {
+			log.Fatalf("upstream: %v", err)
+		}
+		defer upClient.Close()
+		cfg.Dialer = chain.New(upClient.H3Conn())
+		log.Printf("выход через цепочку: upstream %s", *upstreamAddr)
+	}
+
 	log.Printf("узел на %s (authority=%s, назначаю клиенту %s)", *listen, *authority, *assign)
 	if err := server.Run(ctx, cfg); err != nil && ctx.Err() == nil {
 		log.Fatalf("run: %v", err)
 	}
 	log.Print("остановлен")
+}
+
+// dialUpstream поднимает клиентское соединение к upstream-узлу (chain).
+func dialUpstream(ctx context.Context, addr, authority, token string) (*cip.Client, error) {
+	if authority == "" {
+		host, _, _ := net.SplitHostPort(addr)
+		authority = host
+	}
+	tmpl := server.Template(authority, "/connect-ip")
+	sni, _, _ := net.SplitHostPort(addr)
+	tlsConf := &tls.Config{InsecureSkipVerify: true, ServerName: sni}
+	client, _, err := cip.DialAuth(ctx, addr, tmpl, tlsConf, token, "https://"+authority+"/qd-auth")
+	return client, err
 }
 
 // storeOrNil отдаёт nil-интерфейс, если БД нет: server.Config.Store — интерфейс,

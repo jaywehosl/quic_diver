@@ -24,6 +24,7 @@ import (
 	"github.com/yosida95/uritemplate/v3"
 
 	"quicdiver/internal/server/auth"
+	"quicdiver/internal/server/chain"
 	"quicdiver/internal/server/db"
 	"quicdiver/internal/server/decoy"
 	"quicdiver/internal/server/dns"
@@ -278,12 +279,20 @@ func serveConnect(w http.ResponseWriter, r *http.Request, cfg Config) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
+	// hop-limit: транзитный CONNECT (от другого узла) несёт остаток, клиентский —
+	// нет (полный лимит). Ноль у транзита — петля, обрываем decoy'ем, не выдавая
+	// себя. Вниз в Dialer передаём уменьшенный остаток — для следующего узла.
+	hops, fromClient := chain.HopsFromRequest(r)
+	if !fromClient && hops <= 0 {
+		decoy.Handler().ServeHTTP(w, r)
+		return
+	}
 	n := liveConnects.Add(1)
 	defer liveConnects.Add(-1)
 	if n%256 == 0 {
 		log.Printf("CONNECT-стримов живо: %d", n)
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(chain.WithHops(r.Context(), hops-1), 15*time.Second)
 	out, err := cfg.Dialer.DialTCP(ctx, dst)
 	cancel()
 	if err != nil {

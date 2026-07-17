@@ -27,6 +27,9 @@ import (
 // Dialer открывает CONNECT-стримы через существующее H3-соединение с узлом.
 type Dialer struct {
 	CC *http3.ClientConn
+	// Header — дополнительные заголовки CONNECT-запроса (напр. hop-limit при
+	// chain). Едут под QUIC/TLS, наружу невидимы. nil — без добавок.
+	Header http.Header
 }
 
 // DialTCP просит узел соединиться с dst и отдаёт поток как net.Conn.
@@ -46,6 +49,11 @@ func (d Dialer) DialTCP(ctx context.Context, dst netip.AddrPort) (net.Conn, erro
 		Header: make(http.Header),
 		Body:   pr,
 	}).WithContext(sctx)
+	for k, vs := range d.Header {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
 
 	type result struct {
 		resp *http.Response

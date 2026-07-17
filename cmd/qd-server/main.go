@@ -46,6 +46,7 @@ func main() {
 	dnsMaxTTL := flag.Duration("dns-max-ttl", time.Hour, "не кешировать дольше")
 	dnsGC := flag.Duration("dns-gc", time.Minute, "период мягкой очистки кеша (выброс протухшего)")
 	dbPath := flag.String("db", "", "файл БД токенов (пусто → узел ОТКРЫТ, любой клиент проходит — только для dev)")
+	poolCIDR := flag.String("pool", "10.7.0.0/16", "пул адресов клиентов (IPv4); каждому токену — стабильный адрес")
 	adminToken := flag.String("admin-token", "", "admin-токен сети из деплоя: его хеш кладётся в БД (пусто → не трогать)")
 	nodeToken := flag.String("node-token", "", "node-токен этого узла из деплоя: его хеш кладётся в БД (пусто → не трогать)")
 	addUser := flag.Bool("add-user", false, "сгенерировать клиентский токен, записать в БД и выйти (нужен -db)")
@@ -119,6 +120,7 @@ func main() {
 		DNSGCEvery:    *dnsGC,
 		AuthPath:      "/qd-auth",
 		Store:         storeOrNil(store),
+		Pool:          poolFor(store, *poolCIDR),
 		TLS:           tlsConf,
 		Assign:        []netip.Prefix{pfx},
 		Routes: []connectip.IPRoute{
@@ -145,6 +147,20 @@ func storeOrNil(s *db.SQLite) db.Store {
 		return nil
 	}
 	return s
+}
+
+// poolFor разбирает пул адресов. Без БД пул не нужен (клиент получает статический
+// Assign) — возвращаем невалидный префикс.
+func poolFor(s *db.SQLite, cidr string) netip.Prefix {
+	if s == nil {
+		return netip.Prefix{}
+	}
+	p, err := netip.ParsePrefix(cidr)
+	if err != nil {
+		log.Fatalf("bad -pool: %v", err)
+	}
+	log.Printf("пул адресов клиентов: %s", p)
+	return p
 }
 
 // seedNetworkToken кладёт хеш admin/node-секрета из деплой-параметров в БД. Сам

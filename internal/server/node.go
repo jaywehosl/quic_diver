@@ -41,8 +41,12 @@ type Config struct {
 	ConnectIPPath string
 	// TLS — серверный TLS (реальный серт по домену; self-signed для локали).
 	TLS *tls.Config
-	// Assign — адреса, назначаемые клиенту (пока статический /32; пул — TODO).
+	// Assign — статический адрес клиента для dev-режима (без БД). С БД адрес
+	// берётся из Pool по токену.
 	Assign []netip.Prefix
+	// Pool — диапазон адресов клиентов (IPv4). Валиден только вместе со Store:
+	// каждому токену выделяется стабильный адрес из пула.
+	Pool netip.Prefix
 	// Routes — рекламируемые клиенту маршруты (обычно весь IPv4/IPv6).
 	Routes []connectip.IPRoute
 	// Dialer — выход наружу: direct (netstack.NetDialer) или chain.
@@ -131,6 +135,12 @@ func Run(ctx context.Context, cfg Config) error {
 			decoy.Handler().ServeHTTP(w, r)
 			return
 		}
+		assign, err := assignFor(r.Context(), cfg)
+		if err != nil {
+			// пул исчерпан или БД сбоит — не выдаём себя, роняем как decoy
+			decoy.Handler().ServeHTTP(w, r)
+			return
+		}
 		req, err := connectip.ParseRequest(r, tmpl)
 		if err != nil {
 			// не валидный connect-ip запрос → decoy, не выдавать себя
@@ -141,7 +151,7 @@ func Run(ctx context.Context, cfg Config) error {
 		if err != nil {
 			return
 		}
-		go serveTunnel(ctx, conn, cfg)
+		go serveTunnel(ctx, conn, cfg, assign)
 	})
 
 	// Обычный CONNECT (RFC 9114) — надёжный stream для TCP-флоу гибрида: ретрансмит
@@ -233,6 +243,28 @@ func sessionAllowed(ctx context.Context, cfg Config) bool {
 	return sess != nil && sess.Authorized()
 }
 
+// assignFor выбирает адрес(а), которые получит клиент. С БД — стабильный адрес из
+// пула по токену (для роутинга по клиенту и логов). Без БД (dev) — статический
+// Assign из конфига.
+func assignFor(ctx context.Context, cfg Config) ([]netip.Prefix, error) {
+	if cfg.Store == nil || !cfg.Pool.IsValid() {
+		return cfg.Assign, nil
+	}
+	sess := auth.SessionFrom(ctx)
+	if sess == nil {
+		return nil, fmt.Errorf("нет сессии")
+	}
+	_, hash, ok := sess.Status()
+	if !ok {
+		return nil, fmt.Errorf("сессия не авторизована")
+	}
+	addr, err := cfg.Store.AllocateAddress(ctx, hash, cfg.Pool)
+	if err != nil {
+		return nil, err
+	}
+	return []netip.Prefix{netip.PrefixFrom(addr, addr.BitLen())}, nil
+}
+
 // serveConnect обслуживает CONNECT-туннель одного TCP-флоу: соединяется с
 // запрошенным адресом (direct; chain придёт сюда же через Dialer) и склеивает
 // поток с QUIC-стримом.
@@ -289,9 +321,10 @@ func (fw flushWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// serveTunnel назначает клиенту адрес/маршруты и запускает forwarder.
-func serveTunnel(ctx context.Context, conn *connectip.Conn, cfg Config) {
-	if err := conn.AssignAddresses(ctx, cfg.Assign); err != nil {
+// serveTunnel назначает клиенту адрес/маршруты и запускает forwarder. assign —
+// адрес(а) именно этого клиента (из пула по токену либо статический в dev).
+func serveTunnel(ctx context.Context, conn *connectip.Conn, cfg Config, assign []netip.Prefix) {
+	if err := conn.AssignAddresses(ctx, assign); err != nil {
 		conn.Close()
 		return
 	}

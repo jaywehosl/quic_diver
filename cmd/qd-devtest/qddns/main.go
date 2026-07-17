@@ -45,6 +45,10 @@ func main() {
 	}
 	defer client.Close()
 
+	if prefs, err := client.LocalPrefixes(ctx); err == nil {
+		log.Printf("узел назначил адрес: %v", prefs)
+	}
+
 	fwd := dnsforward.New(client.H3Conn(), "https://"+*authority+"/dns-query")
 
 	// Режим listener'а: тот же путь, что и в бою (приложение → наш listener →

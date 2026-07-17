@@ -23,6 +23,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/netip"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -50,12 +51,14 @@ CREATE TABLE IF NOT EXISTS tokens (
 );
 CREATE INDEX IF NOT EXISTS tokens_role ON tokens(role);
 
--- Адрес, назначаемый клиенту (пул — позже; сейчас 1:1 к токену).
+-- Адрес, назначаемый клиенту. Стабилен по токену, из пула узла.
 CREATE TABLE IF NOT EXISTS assignments (
 	token_hash TEXT PRIMARY KEY REFERENCES tokens(hash) ON DELETE CASCADE,
-	addr       TEXT NOT NULL,             -- напр. 10.7.0.5/32
+	addr       TEXT NOT NULL,             -- голый IP, напр. 10.7.0.5
 	updated_at INTEGER NOT NULL
 );
+-- Один адрес — одному клиенту: страховка от гонки аллокатора на уровне схемы.
+CREATE UNIQUE INDEX IF NOT EXISTS assignments_addr ON assignments(addr);
 `
 
 // Open открывает (создаёт) БД по пути и накатывает схему.
@@ -150,6 +153,97 @@ func (s *SQLite) SetAssignment(ctx context.Context, hash, addr string) error {
 		return fmt.Errorf("db: назначить адрес: %w", err)
 	}
 	return nil
+}
+
+// ErrPoolExhausted — в пуле не осталось свободных адресов.
+var ErrPoolExhausted = errors.New("db: пул адресов исчерпан")
+
+// AllocateAddress возвращает адрес клиента по хешу токена, выделяя новый из пула
+// при первом обращении.
+//
+// Адрес стабилен: тот же токен всегда получает тот же адрес — это нужно для
+// роутинга по клиенту и осмысленных логов, и переживает переподключение и
+// переезд на другой узел (адрес едет в реплике БД).
+//
+// Выделение атомарно (одна транзакция под single-writer'ом): читаем занятые,
+// берём первый свободный, вставляем. UNIQUE(addr) страхует от гонки на уровне
+// схемы, даже если аллокатор кто-то позовёт из другого процесса.
+func (s *SQLite) AllocateAddress(ctx context.Context, hash string, pool netip.Prefix) (netip.Addr, error) {
+	if !pool.Addr().Is4() {
+		return netip.Addr{}, fmt.Errorf("db: пул должен быть IPv4, дан %s", pool)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return netip.Addr{}, err
+	}
+	defer tx.Rollback() // no-op после Commit
+
+	// уже назначен — вернуть тот же
+	var existing string
+	err = tx.QueryRowContext(ctx, `SELECT addr FROM assignments WHERE token_hash=?`, hash).Scan(&existing)
+	if err == nil {
+		addr, perr := netip.ParseAddr(existing)
+		if perr != nil {
+			return netip.Addr{}, fmt.Errorf("db: битый адрес в БД: %q", existing)
+		}
+		return addr, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return netip.Addr{}, err
+	}
+
+	taken, err := takenAddrs(ctx, tx)
+	if err != nil {
+		return netip.Addr{}, err
+	}
+	addr, ok := firstFree(pool, taken)
+	if !ok {
+		return netip.Addr{}, ErrPoolExhausted
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO assignments(token_hash, addr, updated_at) VALUES(?, ?, ?)`,
+		hash, addr.String(), time.Now().UnixNano()); err != nil {
+		return netip.Addr{}, fmt.Errorf("db: выделить адрес: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return netip.Addr{}, err
+	}
+	return addr, nil
+}
+
+// takenAddrs — множество уже занятых адресов пула.
+func takenAddrs(ctx context.Context, tx *sql.Tx) (map[netip.Addr]struct{}, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT addr FROM assignments`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	taken := make(map[netip.Addr]struct{})
+	for rows.Next() {
+		var a string
+		if err := rows.Scan(&a); err != nil {
+			return nil, err
+		}
+		if addr, err := netip.ParseAddr(a); err == nil {
+			taken[addr] = struct{}{}
+		}
+	}
+	return taken, rows.Err()
+}
+
+// firstFree — первый свободный адрес пула. Первые два (сеть и адрес узла-шлюза)
+// пропускаются: .0 — сетевой, .1 держит сам узел.
+func firstFree(pool netip.Prefix, taken map[netip.Addr]struct{}) (netip.Addr, bool) {
+	pool = pool.Masked()
+	addr := pool.Addr().Next() // .1
+	addr = addr.Next()         // .2 — первый клиентский
+	for pool.Contains(addr) {
+		if _, busy := taken[addr]; !busy {
+			return addr, true
+		}
+		addr = addr.Next()
+	}
+	return netip.Addr{}, false
 }
 
 // Assignment возвращает адрес клиента, если задан.

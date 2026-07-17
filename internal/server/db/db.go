@@ -5,7 +5,10 @@
 // реплицируемый бэкенд) без правок вызывающих.
 package db
 
-import "context"
+import (
+	"context"
+	"net/netip"
+)
 
 // Store — контракт хранилища узла.
 type Store interface {
@@ -14,6 +17,9 @@ type Store interface {
 	Lookup(ctx context.Context, hash string) (TokenInfo, error)
 	// Assignment — адрес, назначенный клиенту (пустой + ErrNotFound, если нет).
 	Assignment(ctx context.Context, hash string) (string, error)
+	// AllocateAddress — стабильный адрес клиента из пула по хешу токена (выделяет
+	// при первом обращении). ErrPoolExhausted, если свободных нет.
+	AllocateAddress(ctx context.Context, hash string, pool netip.Prefix) (netip.Addr, error)
 	// Close закрывает хранилище.
 	Close() error
 }

@@ -80,6 +80,10 @@ func (c *Client) Migrate(ctx context.Context, laddr *net.UDPAddr) error {
 	return c.qc.Migrate(ctx, laddr)
 }
 
+// Context закрывается со смертью QUIC-сессии (idle-таймаут, CONNECTION_CLOSE).
+// По нему supervisor понимает, что путь мёртв и туннель надо поднимать заново.
+func (c *Client) Context() context.Context { return c.qc.QUIC().Context() }
+
 // Close закрывает туннель и весь стек под ним.
 func (c *Client) Close() error {
 	err := c.ip.Close()

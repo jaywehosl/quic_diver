@@ -16,6 +16,7 @@ package supervisor
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net"
 	"sync"
@@ -24,10 +25,15 @@ import (
 	"quicdiver/internal/client/netwatch"
 )
 
-// Migrator — то, что умеет перенести сессию на новый локальный сокет.
-// Реализуется cip.Client.
+// ErrSessionDead — сессия умерла и миграцией не спасается: нужен новый туннель.
+var ErrSessionDead = errors.New("supervisor: QUIC-сессия мертва")
+
+// Migrator — то, что умеет перенести сессию на новый локальный сокет и сказать,
+// жива ли она. Реализуется cip.Client.
 type Migrator interface {
 	Migrate(ctx context.Context, laddr *net.UDPAddr) error
+	// Context закрывается, когда сессия умерла (idle-таймаут, CONNECTION_CLOSE).
+	Context() context.Context
 }
 
 // Config — параметры supervisor'а.
@@ -63,19 +69,42 @@ func New(cfg Config) *Supervisor {
 	return &Supervisor{cfg: cfg}
 }
 
-// Run слушает смену сети и блокируется до отмены ctx.
-func (s *Supervisor) Run(ctx context.Context) {
+// Run следит за сетью и за живостью сессии.
+//
+// Возвращает ErrSessionDead, если сессия умерла: миграция тут уже не поможет
+// (переносить нечего), нужен новый туннель. Это тот самый случай, который смена
+// локального адреса не ловит: роутер пересобрал PPPoE — локальный адрес прежний,
+// сменился публичный, NAT-маппинг слетел, ответы узла не доходят.
+//
+// По отмене ctx возвращает nil.
+func (s *Supervisor) Run(ctx context.Context) error {
 	ch := make(chan netwatch.State, 1)
 	go s.cfg.Watch.Run(ctx, s.cfg.Initial, ch)
 
+	dead := deadChan(s.cfg.Client)
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
+		case <-dead:
+			return ErrSessionDead
 		case st := <-ch:
 			s.handle(ctx, st)
 		}
 	}
+}
+
+// deadChan — канал, закрывающийся со смертью сессии. Отдельной функцией, чтобы
+// nil-Context (в тестах с заглушкой) не ронял select.
+func deadChan(m Migrator) <-chan struct{} {
+	if m == nil {
+		return nil
+	}
+	c := m.Context()
+	if c == nil {
+		return nil
+	}
+	return c.Done()
 }
 
 // Stats — сколько переездов пережито и сколько миграций не удалось.

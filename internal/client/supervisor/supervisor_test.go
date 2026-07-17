@@ -12,12 +12,29 @@ import (
 	"quicdiver/internal/client/netwatch"
 )
 
-// spyMigrator запоминает, куда его просили переехать.
+// spyMigrator запоминает, куда его просили переехать, и умеет притвориться
+// умершей сессией.
 type spyMigrator struct {
 	mu    sync.Mutex
 	calls []netip.Addr
 	err   error
 	done  chan struct{}
+
+	ctx  context.Context
+	kill context.CancelFunc
+}
+
+// newSpy создаёт заглушку с живой сессией.
+func newSpy() *spyMigrator {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &spyMigrator{ctx: ctx, kill: cancel}
+}
+
+func (s *spyMigrator) Context() context.Context {
+	if s.ctx == nil {
+		return context.Background() // сессия живёт вечно
+	}
+	return s.ctx
 }
 
 func (s *spyMigrator) Migrate(_ context.Context, laddr *net.UDPAddr) error {
@@ -54,10 +71,59 @@ func (f feed) run(ctx context.Context, ch chan<- netwatch.State) {
 	}
 }
 
+// Главный случай, который смена адреса НЕ ловит: роутер пересобрал PPPoE —
+// локальный адрес прежний, публичный сменился, NAT-маппинг слетел, ответы узла не
+// доходят и сессия умирает по idle-таймауту. Мигрировать некуда: переносить
+// нечего. Supervisor обязан сказать об этом наверх, чтобы стек подняли заново.
+func TestDeadSessionReported(t *testing.T) {
+	spy := newSpy()
+	s := New(Config{Client: spy, Watch: netwatch.Watcher{Interval: time.Hour}})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	errc := make(chan error, 1)
+	go func() { errc <- s.Run(ctx) }()
+
+	spy.kill() // сессия умерла
+
+	select {
+	case err := <-errc:
+		if !errors.Is(err, ErrSessionDead) {
+			t.Fatalf("вернулось %v, ожидался ErrSessionDead", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("смерть сессии не замечена — клиент завис бы с мёртвым туннелем")
+	}
+	if len(spy.seen()) != 0 {
+		t.Fatal("была попытка мигрировать мёртвую сессию")
+	}
+}
+
+// Живая сессия: Run завершается по отмене контекста и без ошибки.
+func TestRunStopsCleanlyOnContextCancel(t *testing.T) {
+	spy := newSpy()
+	s := New(Config{Client: spy, Watch: netwatch.Watcher{Interval: time.Hour}})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errc := make(chan error, 1)
+	go func() { errc <- s.Run(ctx) }()
+	cancel()
+
+	select {
+	case err := <-errc:
+		if err != nil {
+			t.Fatalf("штатная остановка вернула ошибку: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run не завершился по отмене контекста")
+	}
+}
+
 // handle вызывается напрямую: Run — это только цикл поверх него, а вся суть
 // (миграция + пересмотр настроек) здесь.
 func TestMigratesToNewAddressAndReappliesSettings(t *testing.T) {
-	spy := &spyMigrator{}
+	spy := newSpy()
 	var applied []netwatch.State
 
 	s := New(Config{
@@ -87,7 +153,8 @@ func TestMigratesToNewAddressAndReappliesSettings(t *testing.T) {
 // туннель остался на старом пути, и переводить DNS на адаптер, через который
 // связи нет, значило бы добить резолв.
 func TestFailedMigrationSkipsSettings(t *testing.T) {
-	spy := &spyMigrator{err: errors.New("path validation timeout")}
+	spy := newSpy()
+	spy.err = errors.New("path validation timeout")
 	applied := 0
 
 	s := New(Config{
@@ -107,7 +174,7 @@ func TestFailedMigrationSkipsSettings(t *testing.T) {
 // Ошибка пересмотра настроек не должна валить supervisor: туннель уже переехал,
 // и работа продолжается.
 func TestSettingsErrorDoesNotBreakSupervisor(t *testing.T) {
-	spy := &spyMigrator{}
+	spy := newSpy()
 	s := New(Config{
 		Client:          spy,
 		OnNetworkChange: func(netwatch.State) error { return errors.New("реестр занят") },
@@ -121,7 +188,8 @@ func TestSettingsErrorDoesNotBreakSupervisor(t *testing.T) {
 
 // Run реагирует на события и завершается по отмене контекста.
 func TestRunHandlesEventsAndStops(t *testing.T) {
-	spy := &spyMigrator{done: make(chan struct{}, 2)}
+	spy := newSpy()
+	spy.done = make(chan struct{}, 2)
 	s := New(Config{Client: spy})
 
 	ctx, cancel := context.WithCancel(context.Background())

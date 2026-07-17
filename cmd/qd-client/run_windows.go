@@ -21,9 +21,11 @@ import (
 	"quicdiver/internal/client/supervisor"
 	"quicdiver/internal/client/sysdns"
 	"quicdiver/internal/client/sysproxy"
+	"quicdiver/internal/engine"
 	"quicdiver/internal/engine/connectip"
 	"quicdiver/internal/engine/hybrid"
 	"quicdiver/internal/guard"
+	"quicdiver/internal/packet"
 	"quicdiver/internal/packet/windivert"
 	"quicdiver/internal/server"
 	"quicdiver/internal/server/netstack"
@@ -160,7 +162,8 @@ func run(ctx context.Context, o options) error {
 			return nil
 		},
 	})
-	go sup.Run(ctx)
+	supErr := make(chan error, 1)
+	go func() { supErr <- sup.Run(ctx) }()
 	defer func() {
 		if m, f := sup.Stats(); m > 0 || f > 0 {
 			log.Printf("supervisor: переездов пережито %d, неудачных миграций %d", m, f)
@@ -186,12 +189,40 @@ func run(ctx context.Context, o options) error {
 		}
 		eng := hybrid.New(g, rewriter, ns, o.recvWorkers)
 		log.Print("проксирование запущено (ГИБРИД: TCP→стрим, UDP→датаграмма)")
-		return eng.Run(ctx, src, client)
+		return firstErr(runEngine(ctx, eng, src, client), supErr)
 	}
 
 	eng := connectip.New(g, rewriter)
 	log.Print("проксирование запущено (модель B: всё датаграммами)")
-	return eng.Run(ctx, src, client)
+	return firstErr(runEngine(ctx, eng, src, client), supErr)
+}
+
+// engineRunner — общее у гибрида и модели B.
+type engineRunner interface {
+	Run(ctx context.Context, src packet.Source, tun engine.PacketTunnel) error
+}
+
+func runEngine(ctx context.Context, e engineRunner, src packet.Source, tun engine.PacketTunnel) <-chan error {
+	c := make(chan error, 1)
+	go func() { c <- e.Run(ctx, src, tun) }()
+	return c
+}
+
+// firstErr отдаёт то, что случилось раньше: обрыв движка или приговор supervisor'а.
+//
+// Сессию может убить и то, и другое: движок увидит ошибку чтения из мёртвого
+// туннеля, supervisor — закрытый контекст сессии. Кто первый, тот и причина;
+// возвращаем её наверх, где serve поднимет стек заново.
+func firstErr(engErr <-chan error, supErr <-chan error) error {
+	select {
+	case err := <-engErr:
+		return err
+	case err := <-supErr:
+		if err != nil {
+			return err
+		}
+		return <-engErr // supervisor завершился штатно — ждём движок
+	}
 }
 
 // recoverDNS возвращает системный резолвер, если прошлый запуск умер аварийно

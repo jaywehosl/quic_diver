@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"time"
 )
 
 type options struct {
@@ -65,8 +66,59 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	if err := run(ctx, o); err != nil && ctx.Err() == nil {
-		log.Fatalf("run: %v", err)
-	}
+	serve(ctx, o)
 	log.Print("остановлен")
+}
+
+// Границы паузы между попытками переподключения.
+const (
+	minBackoff = time.Second
+	maxBackoff = 30 * time.Second
+	// stableRun — сколько сессия должна прожить, чтобы счесть её удавшейся и
+	// сбросить паузу. Иначе после долгой работы первый же обрыв ждал бы полминуты.
+	stableRun = time.Minute
+)
+
+// serve держит клиента поднятым: сессия умерла — поднимаем заново (arch4).
+//
+// Миграция спасает от смены адреса, но не от всего: если роутер пересобрал PPPoE,
+// локальный адрес не менялся, а публичный сменился — NAT-маппинг слетел, ответы
+// узла не доходят, и сессия умирает по idle-таймауту. Раньше на этом клиент просто
+// падал (log.Fatal) и пользователь оставался без сети до ручного перезапуска.
+//
+// Пересоздаём весь стек, а не только сессию: со смертью QUIC умерли и все
+// CONNECT-стримы, то есть соединения приложений оборваны в любом случае. Выход из
+// run вернёт системе прокси и DNS, поэтому следующий резолв домена узла пойдёт
+// через настоящий DNS провайдера, а не через наш уже неживой listener.
+func serve(ctx context.Context, o options) { serveWith(ctx, o, run) }
+
+// serveWith — та же петля с подставным запуском (для тестов).
+func serveWith(ctx context.Context, o options, runFn func(context.Context, options) error) {
+	backoff := minBackoff
+	for attempt := 1; ctx.Err() == nil; attempt++ {
+		start := time.Now()
+		err := runFn(ctx, o)
+		lived := time.Since(start)
+
+		if ctx.Err() != nil {
+			return // штатная остановка по Ctrl+C
+		}
+		if err == nil {
+			return
+		}
+		if lived >= stableRun {
+			backoff = minBackoff // сессия работала долго — обрыв разовый
+		}
+		log.Printf("сессия оборвалась после %v: %v", lived.Round(time.Second), err)
+		log.Printf("переподключение через %v (попытка %d)", backoff, attempt)
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		if backoff *= 2; backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+	}
 }

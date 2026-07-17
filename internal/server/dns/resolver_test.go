@@ -223,3 +223,39 @@ func TestGCEvictsExpired(t *testing.T) {
 	}
 	t.Fatal("GC не выбросил протухшую запись — очистка мертва")
 }
+
+// Смена upstream на лету должна подхватываться следующим же запросом (аварийный
+// сценарий: старый upstream сломался, admin меняет без рестарта узла).
+func TestSetUpstreamLive(t *testing.T) {
+	up1 := &fakeUpstream{ttl: 300, ip: [4]byte{1, 1, 1, 1}}
+	up2 := &fakeUpstream{ttl: 300, ip: [4]byte{2, 2, 2, 2}}
+	r := New(Config{Upstream: up1, CacheSize: 10})
+
+	r.SetUpstream(up2)
+	// новое имя (мимо кеша) должно уйти в up2
+	if _, err := r.Query(context.Background(), query(t, "fresh.example.", 1)); err != nil {
+		t.Fatal(err)
+	}
+	if up2.calls.Load() == 0 {
+		t.Fatal("запрос не ушёл в новый upstream")
+	}
+}
+
+// Resize пересоздаёт кеш: старые записи уходят, новый потолок в силе.
+func TestResizeCache(t *testing.T) {
+	up := &fakeUpstream{ttl: 300, ip: [4]byte{1, 2, 3, 4}}
+	r := New(Config{Upstream: up, CacheSize: 100})
+	if _, err := r.Query(context.Background(), query(t, "a.example.", 1)); err != nil {
+		t.Fatal(err)
+	}
+	if size, _, _ := r.Cache().Stats(); size != 1 {
+		t.Fatalf("до resize size=%d", size)
+	}
+	r.Resize(50)
+	if size, _, _ := r.Cache().Stats(); size != 0 {
+		t.Fatalf("после resize кеш не сброшен: size=%d", size)
+	}
+	if r.Settings().CacheSize != 50 {
+		t.Fatalf("новый потолок не применён: %d", r.Settings().CacheSize)
+	}
+}

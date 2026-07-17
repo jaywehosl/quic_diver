@@ -65,6 +65,9 @@ type Config struct {
 	// AuthPath — путь эндпоинта авторизации сессии, обычно "/qd-auth". Клиент
 	// предъявляет туда токен до connect-ip; сессия помечается доверенной.
 	AuthPath string
+	// AdminPath — путь admin-API (управление резолвером), обычно "/qd-admin/dns".
+	// Пусто → не поднимается. Доступ строго по admin-токену.
+	AdminPath string
 }
 
 // Template строит URI Template connect-ip эндпоинта. Клиент и узел обязаны
@@ -109,6 +112,12 @@ func Run(ctx context.Context, cfg Config) error {
 		}))
 		go cfg.Resolver.RunGC(ctx, cfg.DNSGCEvery)
 		log.Printf("DoH на %s", cfg.DNSPath)
+
+		// Admin-API управления резолвером (upstream/кеш/TTL/flush) по admin-токену.
+		if cfg.AdminPath != "" {
+			mux.Handle(cfg.AdminPath, adminDNS(cfg))
+			log.Printf("admin-API DNS на %s", cfg.AdminPath)
+		}
 	}
 	// Авторизация сессии: клиент предъявляет токен ДО connect-ip. Проверяем один
 	// раз на QUIC-сессию — connect-ip и все CONNECT-стримы идут по ней же и

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -125,4 +126,24 @@ func (u *dohUpstream) Exchange(ctx context.Context, query []byte) ([]byte, error
 		return nil, fmt.Errorf("DoH %s: статус %d", u.url, resp.StatusCode)
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+}
+
+// ParseUpstream разбирает адрес upstream-DNS по схеме: https:// (DoH),
+// tls://host:port (DoT), udp://host:port (plain). Общий для флага -dns и admin-API.
+func ParseUpstream(s string) (Upstream, error) {
+	switch {
+	case strings.HasPrefix(s, "https://"):
+		return NewDoH(s), nil
+	case strings.HasPrefix(s, "tls://"):
+		addr := strings.TrimPrefix(s, "tls://")
+		host, _, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, fmt.Errorf("tls:// ждёт host:port: %w", err)
+		}
+		return NewDoT(addr, host), nil
+	case strings.HasPrefix(s, "udp://"):
+		return NewPlain(strings.TrimPrefix(s, "udp://")), nil
+	default:
+		return nil, fmt.Errorf("неизвестная схема %q (нужно https://, tls:// или udp://)", s)
+	}
 }

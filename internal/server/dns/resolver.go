@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
@@ -27,7 +28,11 @@ type Config struct {
 }
 
 // Resolver — DNS-резолвер узла с кешем.
+//
+// Настройки меняются на лету (admin через API): upstream, размер кеша, TTL. Всё
+// под mu — горячий путь Query снимает снапшот под RLock, дёшево.
 type Resolver struct {
+	mu    sync.RWMutex
 	cfg   Config
 	cache *Cache
 }
@@ -44,7 +49,59 @@ func New(cfg Config) *Resolver {
 }
 
 // Cache — доступ к кешу (статистика и очистка из админки).
-func (r *Resolver) Cache() *Cache { return r.cache }
+func (r *Resolver) Cache() *Cache {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.cache
+}
+
+// SetUpstream меняет upstream-резолвер на лету.
+func (r *Resolver) SetUpstream(u Upstream) {
+	r.mu.Lock()
+	r.cfg.Upstream = u
+	r.mu.Unlock()
+}
+
+// SetTTL меняет политику TTL. Нулевой override — брать из ответа.
+func (r *Resolver) SetTTL(override, min, max time.Duration) {
+	r.mu.Lock()
+	r.cfg.TTLOverride, r.cfg.MinTTL = override, min
+	if max > 0 {
+		r.cfg.MaxTTL = max
+	}
+	r.mu.Unlock()
+}
+
+// Resize пересоздаёт кеш с новым потолком (старые записи сбрасываются — дешевле,
+// чем переносить, а admin-действие редкое).
+func (r *Resolver) Resize(size int) {
+	c := NewCache(size)
+	r.mu.Lock()
+	r.cfg.CacheSize, r.cache = size, c
+	r.mu.Unlock()
+}
+
+// Settings — текущие настройки резолвера (для GET в админке).
+type Settings struct {
+	Upstream    string        `json:"upstream"`
+	CacheSize   int           `json:"cache_size"`
+	TTLOverride time.Duration `json:"ttl_override"`
+	MinTTL      time.Duration `json:"min_ttl"`
+	MaxTTL      time.Duration `json:"max_ttl"`
+}
+
+// Settings снимает текущие настройки.
+func (r *Resolver) Settings() Settings {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return Settings{
+		Upstream:    r.cfg.Upstream.String(),
+		CacheSize:   r.cfg.CacheSize,
+		TTLOverride: r.cfg.TTLOverride,
+		MinTTL:      r.cfg.MinTTL,
+		MaxTTL:      r.cfg.MaxTTL,
+	}
+}
 
 // RunGC периодически делает мягкую очистку и блокируется до отмены ctx.
 //
@@ -62,7 +119,7 @@ func (r *Resolver) RunGC(ctx context.Context, every time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			r.cache.FlushExpired()
+			r.Cache().FlushExpired()
 		}
 	}
 }
@@ -83,19 +140,24 @@ func (r *Resolver) Query(ctx context.Context, query []byte) ([]byte, error) {
 		return nxdomain(hdr.ID, q)
 	}
 
+	// снапшот изменяемых настроек под RLock — дальше работаем без блокировки
+	r.mu.RLock()
+	upstream, timeout, cache := r.cfg.Upstream, r.cfg.Timeout, r.cache
+	r.mu.RUnlock()
+
 	key := cacheKey(q)
-	if resp, ok := r.cache.Get(key); ok {
+	if resp, ok := cache.Get(key); ok {
 		return withID(resp, hdr.ID)
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, r.cfg.Timeout)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	resp, err := r.cfg.Upstream.Exchange(ctx, query)
+	resp, err := upstream.Exchange(ctx, query)
 	if err != nil {
-		return nil, fmt.Errorf("upstream %s: %w", r.cfg.Upstream, err)
+		return nil, fmt.Errorf("upstream %s: %w", upstream, err)
 	}
 	if ttl := r.ttlOf(resp); ttl > 0 {
-		r.cache.Put(key, resp, ttl)
+		cache.Put(key, resp, ttl)
 	}
 	return resp, nil
 }
@@ -106,8 +168,12 @@ func cacheKey(q dnsmessage.Question) string {
 
 // ttlOf берёт минимальный TTL из ответа и приводит к настройкам узла.
 func (r *Resolver) ttlOf(resp []byte) time.Duration {
-	if r.cfg.TTLOverride > 0 {
-		return r.cfg.TTLOverride
+	r.mu.RLock()
+	override, minTTL, maxTTL := r.cfg.TTLOverride, r.cfg.MinTTL, r.cfg.MaxTTL
+	r.mu.RUnlock()
+
+	if override > 0 {
+		return override
 	}
 	var p dnsmessage.Parser
 	if _, err := p.Start(resp); err != nil {
@@ -133,11 +199,11 @@ func (r *Resolver) ttlOf(resp []byte) time.Duration {
 		return 0 // ответов нет — не кешируем
 	}
 	ttl := time.Duration(min) * time.Second
-	if ttl < r.cfg.MinTTL {
-		ttl = r.cfg.MinTTL
+	if ttl < minTTL {
+		ttl = minTTL
 	}
-	if ttl > r.cfg.MaxTTL {
-		ttl = r.cfg.MaxTTL
+	if ttl > maxTTL {
+		ttl = maxTTL
 	}
 	return ttl
 }

@@ -19,7 +19,6 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
-	"strings"
 	"time"
 
 	connectip "github.com/quic-go/connect-ip-go"
@@ -82,7 +81,7 @@ func main() {
 		log.Fatalf("bad -assign: %v", err)
 	}
 
-	up, err := parseUpstream(*dnsUpstream)
+	up, err := dns.ParseUpstream(*dnsUpstream)
 	if err != nil {
 		log.Fatalf("dns upstream: %v", err)
 	}
@@ -124,6 +123,7 @@ func main() {
 		DNSPath:       "/dns-query",
 		DNSGCEvery:    *dnsGC,
 		AuthPath:      "/qd-auth",
+		AdminPath:     "/qd-admin/dns",
 		Store:         storeOrNil(store),
 		Pool:          poolFor(store, *poolCIDR),
 		TLS:           tlsConf,
@@ -226,26 +226,6 @@ func cmdAddUser(dbPath, label string) error {
 	fmt.Printf("клиентский токен создан (показывается один раз):\n\n  %s\n\n", token)
 	fmt.Printf("метка: %q\nв БД лежит только хеш; передайте токен клиенту флагом -token.\n", label)
 	return nil
-}
-
-// parseUpstream разбирает адрес upstream-DNS: схема выбирает транспорт (arch —
-// «DNS, DoT, DoH на выбор»).
-func parseUpstream(s string) (dns.Upstream, error) {
-	switch {
-	case strings.HasPrefix(s, "https://"):
-		return dns.NewDoH(s), nil
-	case strings.HasPrefix(s, "tls://"):
-		addr := strings.TrimPrefix(s, "tls://")
-		host, _, err := net.SplitHostPort(addr)
-		if err != nil {
-			return nil, fmt.Errorf("tls:// ждёт host:port: %w", err)
-		}
-		return dns.NewDoT(addr, host), nil
-	case strings.HasPrefix(s, "udp://"):
-		return dns.NewPlain(strings.TrimPrefix(s, "udp://")), nil
-	default:
-		return nil, fmt.Errorf("неизвестная схема %q (нужно https://, tls:// или udp://)", s)
-	}
 }
 
 // loadTLS берёт серт из файлов (реальный домен) или генерит self-signed (dev).

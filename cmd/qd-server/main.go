@@ -138,16 +138,27 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	// Chain (arch): выход не в реальную сеть, а через upstream-узел. A предъявляет
-	// B node-токен и ходит CONNECT-стримами — так же, как клиент ходит к A.
+	// Chain + роутинг: два выхода — direct и цепочка через upstream-узел. Пул
+	// делится на подсети (по одной на выход); клиент шлёт с src нужной подсети
+	// (UDP) или ставит метку Qd-Route (TCP). A предъявляет B node-токен и ходит
+	// CONNECT-стримами — так же, как клиент ходит к A.
 	if *upstreamAddr != "" {
 		upClient, err := dialUpstream(ctx, *upstreamAddr, *upstreamAuthority, *upstreamToken)
 		if err != nil {
 			log.Fatalf("upstream: %v", err)
 		}
 		defer upClient.Close()
-		cfg.Dialer = chain.New(upClient.H3Conn())
-		log.Printf("выход через цепочку: upstream %s", *upstreamAddr)
+
+		subs := server.SplitPool(cfg.Pool, 2)
+		if subs == nil {
+			log.Fatalf("пул %s мал для роутинга", cfg.Pool)
+		}
+		cfg.Outbounds = []server.Outbound{
+			{Label: "direct", Subnet: subs[0], Dialer: netstack.NetDialer{}},
+			{Label: "chain", Subnet: subs[1], Dialer: chain.New(upClient.H3Conn())},
+		}
+		cfg.Pool = subs[0] // аллокатор выдаёт хост-номера в базовой (direct) подсети
+		log.Printf("выходы: direct %s, chain→%s %s", subs[0], *upstreamAddr, subs[1])
 	}
 
 	log.Printf("узел на %s (authority=%s, назначаю клиенту %s)", *listen, *authority, *assign)

@@ -55,11 +55,27 @@ type Dialer interface {
 	DialUDP(ctx context.Context, dst netip.AddrPort) (net.Conn, error)
 }
 
+// Router выбирает выход по src-адресу пакета. Так узел роутит трафик клиента по
+// метке: клиент шлёт с адреса-на-выход, узел читает src → нужный Dialer (direct
+// или chain). Один src → один outbound.
+type Router interface {
+	For(src netip.Addr) Dialer
+}
+
+// single — Router, отдающий один Dialer на любой src (клиент и узел-direct без
+// роутинга).
+type single struct{ d Dialer }
+
+func (s single) For(netip.Addr) Dialer { return s.d }
+
+// Single оборачивает один Dialer в Router (поведение «всё через один выход»).
+func Single(d Dialer) Router { return single{d} }
+
 // Stack — netstack узла.
 type Stack struct {
 	stack  *stack.Stack
 	ep     *channel.Endpoint
-	dialer Dialer
+	router Router
 	mtu    int
 }
 
@@ -69,15 +85,20 @@ type Stack struct {
 // локальной сети: он общается с ОС через инжект, и мелкий MTU только дробит поток
 // на лишние пакеты.
 func NewWithMTU(d Dialer, mtu int) (*Stack, error) {
-	return newStack(d, mtu)
+	return newStack(Single(d), mtu)
 }
 
-// New поднимает стек с TCP/UDP-форвардерами, направляющими трафик через d.
+// New поднимает стек с одним выходом d (клиент, узел-direct).
 func New(d Dialer) (*Stack, error) {
-	return newStack(d, channelMTU)
+	return newStack(Single(d), channelMTU)
 }
 
-func newStack(d Dialer, mtu int) (*Stack, error) {
+// NewRouted поднимает стек с роутингом по src-адресу (узел с несколькими выходами).
+func NewRouted(r Router) (*Stack, error) {
+	return newStack(r, channelMTU)
+}
+
+func newStack(r Router, mtu int) (*Stack, error) {
 	s := stack.New(stack.Options{
 		NetworkProtocols: []stack.NetworkProtocolFactory{
 			ipv4.NewProtocol, ipv6.NewProtocol,
@@ -119,7 +140,7 @@ func newStack(d Dialer, mtu int) (*Stack, error) {
 		{Destination: header.IPv6EmptySubnet, NIC: nicID},
 	})
 
-	st := &Stack{stack: s, ep: ep, dialer: d, mtu: mtu}
+	st := &Stack{stack: s, ep: ep, router: r, mtu: mtu}
 
 	tcpFwd := tcp.NewForwarder(s, 0, maxInFlight, st.handleTCP)
 	s.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpFwd.HandlePacket)
@@ -216,9 +237,10 @@ func (s *Stack) egress(ctx context.Context, t Tunnel) {
 func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	id := r.ID()
 	dst := netip.AddrPortFrom(toNetip(id.LocalAddress), id.LocalPort)
+	dialer := s.router.For(toNetip(id.RemoteAddress)) // выход по src-метке клиента
 
 	ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
-	outbound, err := s.dialer.DialTCP(ctx, dst)
+	outbound, err := dialer.DialTCP(ctx, dst)
 	cancel()
 	if err != nil {
 		log.Printf("netstack: dial %s: %v (RST инициатору)", dst, err)
@@ -244,8 +266,9 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 	id := r.ID()
 	dst := netip.AddrPortFrom(toNetip(id.LocalAddress), id.LocalPort)
+	dialer := s.router.For(toNetip(id.RemoteAddress)) // выход по src-метке клиента
 
-	outbound, err := s.dialer.DialUDP(context.Background(), dst)
+	outbound, err := dialer.DialUDP(context.Background(), dst)
 	if err != nil {
 		return // дроп
 	}

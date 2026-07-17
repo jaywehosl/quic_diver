@@ -50,8 +50,12 @@ type Config struct {
 	Pool netip.Prefix
 	// Routes — рекламируемые клиенту маршруты (обычно весь IPv4/IPv6).
 	Routes []connectip.IPRoute
-	// Dialer — выход наружу: direct (netstack.NetDialer) или chain.
+	// Dialer — выход по умолчанию (dev/один выход): direct или chain. Используется,
+	// когда Outbounds пуст.
 	Dialer netstack.Dialer
+	// Outbounds — несколько выходов с роутингом по src-адресу. Клиент получает
+	// адрес в подсети каждого выхода и шлёт с нужного src. Пусто → один Dialer.
+	Outbounds []Outbound
 	// Resolver — DNS узла (кеш + upstream). nil → эндпоинт /dns-query не поднимается.
 	// Резолв обязан идти здесь: у клиента провайдер подменяет ответы на заглушку.
 	Resolver *dns.Resolver
@@ -94,6 +98,15 @@ func Run(ctx context.Context, cfg Config) error {
 
 	tmpl := Template(cfg.Authority, cfg.ConnectIPPath)
 	proxy := &connectip.Proxy{}
+
+	// Роутер выхода: несколько outbound'ов → выбор по src-адресу; иначе один Dialer.
+	var router netstack.Router
+	if len(cfg.Outbounds) > 0 {
+		router = newRouter(cfg.Outbounds)
+		log.Printf("роутинг по src: %d выход(ов)", len(cfg.Outbounds))
+	} else {
+		router = netstack.Single(cfg.Dialer)
+	}
 
 	mux := http.NewServeMux()
 	mux.Handle("/", decoy.Handler()) // всё прочее — decoy
@@ -161,7 +174,7 @@ func Run(ctx context.Context, cfg Config) error {
 		if err != nil {
 			return
 		}
-		go serveTunnel(ctx, conn, cfg, assign)
+		go serveTunnel(ctx, conn, cfg, assign, router)
 	})
 
 	// Обычный CONNECT (RFC 9114) — надёжный stream для TCP-флоу гибрида: ретрансмит
@@ -272,7 +285,13 @@ func assignFor(ctx context.Context, cfg Config) ([]netip.Prefix, error) {
 	if err != nil {
 		return nil, err
 	}
-	return []netip.Prefix{netip.PrefixFrom(addr, addr.BitLen())}, nil
+	// Без роутинга — один /32 (как раньше). С выходами — тот же хост-номер во всех
+	// outbound-подсетях: клиент шлёт с нужного src, узел роутит по подсети.
+	if len(cfg.Outbounds) == 0 {
+		return []netip.Prefix{netip.PrefixFrom(addr, addr.BitLen())}, nil
+	}
+	host := hostFromAddr(cfg.Outbounds[0].Subnet, addr)
+	return addrsForHost(cfg.Outbounds, host), nil
 }
 
 // serveConnect обслуживает CONNECT-туннель одного TCP-флоу: соединяется с
@@ -301,8 +320,12 @@ func serveConnect(w http.ResponseWriter, r *http.Request, cfg Config) {
 	if n%256 == 0 {
 		log.Printf("CONNECT-стримов живо: %d", n)
 	}
+	// Выход для этого флоу: TCP идёт CONNECT-стримом (мимо IP-слоя), поэтому метка
+	// маршрута едет заголовком, а не src-адресом (как у датаграмм). Клиент ставит
+	// Qd-Route по своему правилу; пусто/неизвестно → выход по умолчанию (direct).
+	dialer := cfg.outboundDialer(r.Header.Get(RouteHeader))
 	ctx, cancel := context.WithTimeout(chain.WithHops(r.Context(), hops-1), 15*time.Second)
-	out, err := cfg.Dialer.DialTCP(ctx, dst)
+	out, err := dialer.DialTCP(ctx, dst)
 	cancel()
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
@@ -339,9 +362,10 @@ func (fw flushWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// serveTunnel назначает клиенту адрес/маршруты и запускает forwarder. assign —
-// адрес(а) именно этого клиента (из пула по токену либо статический в dev).
-func serveTunnel(ctx context.Context, conn *connectip.Conn, cfg Config, assign []netip.Prefix) {
+// serveTunnel назначает клиенту адрес(а)/маршруты и запускает forwarder. assign —
+// адреса именно этого клиента (по одному на выход при роутинге). router выбирает
+// выход по src-адресу пакета.
+func serveTunnel(ctx context.Context, conn *connectip.Conn, cfg Config, assign []netip.Prefix, router netstack.Router) {
 	if err := conn.AssignAddresses(ctx, assign); err != nil {
 		conn.Close()
 		return
@@ -350,7 +374,7 @@ func serveTunnel(ctx context.Context, conn *connectip.Conn, cfg Config, assign [
 		conn.Close()
 		return
 	}
-	ns, err := netstack.New(cfg.Dialer)
+	ns, err := netstack.NewRouted(router)
 	if err != nil {
 		conn.Close()
 		return

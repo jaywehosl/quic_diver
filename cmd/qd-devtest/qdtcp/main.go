@@ -28,6 +28,7 @@ func main() {
 	token := flag.String("token", "", "токен доступа")
 	hostHdr := flag.String("host", "api.ipify.org", "Host для HTTP-запроса")
 	dstStr := flag.String("dst", "", "TCP dst host:port (пусто → резолв -host:80)")
+	route := flag.String("route", "", "метка выхода Qd-Route (напр. chain); пусто → выход по умолчанию")
 	flag.Parse()
 
 	if *authority == "" {
@@ -59,8 +60,12 @@ func main() {
 		log.Fatalf("bad dst: %v", err)
 	}
 
+	var hdr http.Header
+	if *route != "" {
+		hdr = http.Header{"Qd-Route": []string{*route}}
+	}
 	start := time.Now()
-	conn, err := connectdial.Dialer{CC: client.H3Conn()}.DialTCP(ctx, dstAP)
+	conn, err := connectdial.Dialer{CC: client.H3Conn(), Header: hdr}.DialTCP(ctx, dstAP)
 	if err != nil {
 		log.Fatalf("CONNECT %s через узел: %v", dstAP, err)
 	}

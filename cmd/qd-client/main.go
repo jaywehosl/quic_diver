@@ -16,7 +16,10 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"time"
+
+	"quicdiver/internal/client/config"
 )
 
 type options struct {
@@ -56,23 +59,36 @@ func main() {
 		ensureElevated()
 	}
 
-	defServer := firstNonEmpty(builtinServer, "localhost:8443")
+	// Файл настроек — основной источник: в релизе клиент запускается без
+	// аргументов, а правит настройки веб-панель. Флаги остаются инструментом
+	// разработки и перекрывают файл (см. applyFlagOverrides).
+	cfg, cfgErr := config.Load()
+	if cfgErr != nil {
+		// Битый файл не должен молча стать «настройками по умолчанию»: клиент
+		// ушёл бы не на тот узел. Говорим вслух и работаем на дефолтах.
+		log.Printf("настройки не прочитаны (%v) — работаю на значениях по умолчанию", cfgErr)
+	}
+
+	defServer := firstNonEmpty(builtinServer, entryAddr(cfg))
+	if defServer == "" {
+		defServer = "localhost:8443"
+	}
 
 	var o options
 	flag.StringVar(&o.server, "server", defServer, "endpoint узла (host:port)")
-	flag.StringVar(&o.authority, "authority", builtinAuthority, "authority в connect-ip URI (по умолчанию = server)")
+	flag.StringVar(&o.authority, "authority", firstNonEmpty(builtinAuthority, entrySNI(cfg)), "authority в connect-ip URI (по умолчанию = server)")
 	flag.StringVar(&o.dll, "dll", "", "путь к WinDivert.dll (пусто → вшитый распакуется в %APPDATA%\\QUICDiver)")
-	flag.BoolVar(&o.noProxy, "no-proxy", false, "не отключать системный прокси")
-	flag.BoolVar(&o.noDNS, "no-dns", false, "не поднимать локальный резолвер (резолв пойдёт мимо туннеля — провайдер подменит ответы)")
-	flag.StringVar(&o.nat46, "nat46", "auto", "давать IPv6-only хостам фиктивный IPv4: auto (только если своего IPv6 нет), on, off")
-	flag.StringVar(&o.token, "token", builtinToken, "токен доступа к узлу (пусто → узел без БД, dev)")
-	flag.BoolVar(&o.hybrid, "hybrid", true, "TCP через надёжный CONNECT-стрим, UDP датаграммами (false → всё датаграммами, модель B)")
-	flag.IntVar(&o.recvWorkers, "recv-workers", 1, "потоков захвата: 1 сохраняет порядок пакетов; >1 ускоряет скачивание ценой reordering")
-	flag.IntVar(&o.mtu, "mtu", 1500, "MTU локального стека; инжект идёт в интерфейс (у него обычно 1500), а не в PPPoE-путь")
-	flag.IntVar(&o.brutalMbps, "brutal", 0, "слать с полосой N Мбит/с, игнорируя потери (0 — обычный Cubic); ставить НИЖЕ реальной полосы отдачи")
-	flag.StringVar(&o.bypass, "bypass", "", "доп-префиксы в обход перехвата через запятую (напр. 1.2.3.4/32) — для отладки, чтобы не рвать свои соединения")
-	flag.StringVar(&o.rules, "rules", "", "правила роутинга через ; (напр. \"dom:youtube.com=chain;port:443=eu\"); пусто → весь трафик через выход по умолчанию")
-	flag.StringVar(&o.routeDef, "route-default", "direct", "метка выхода по умолчанию (нет совпадений правил)")
+	flag.BoolVar(&o.noProxy, "no-proxy", !cfg.Capture.ManageProxy, "не отключать системный прокси")
+	flag.BoolVar(&o.noDNS, "no-dns", !cfg.Capture.ManageDNS, "не поднимать локальный резолвер (резолв пойдёт мимо туннеля — провайдер подменит ответы)")
+	flag.StringVar(&o.nat46, "nat46", cfg.Capture.NAT46, "давать IPv6-only хостам фиктивный IPv4: auto (только если своего IPv6 нет), on, off")
+	flag.StringVar(&o.token, "token", firstNonEmpty(builtinToken, cfg.Node.Token), "токен доступа к узлу (пусто → узел без БД, dev)")
+	flag.BoolVar(&o.hybrid, "hybrid", cfg.Transport.Hybrid, "TCP через надёжный CONNECT-стрим, UDP датаграммами (false → всё датаграммами, модель B)")
+	flag.IntVar(&o.recvWorkers, "recv-workers", cfg.Transport.RecvWorkers, "потоков захвата: 1 сохраняет порядок пакетов; >1 ускоряет скачивание ценой reordering")
+	flag.IntVar(&o.mtu, "mtu", cfg.Transport.MTU, "MTU локального стека; инжект идёт в интерфейс (у него обычно 1500), а не в PPPoE-путь")
+	flag.IntVar(&o.brutalMbps, "brutal", cfg.Transport.BrutalMbps, "слать с полосой N Мбит/с, игнорируя потери (0 — обычный Cubic); ставить НИЖЕ реальной полосы отдачи")
+	flag.StringVar(&o.bypass, "bypass", strings.Join(cfg.Capture.Bypass, ","), "доп-префиксы в обход перехвата через запятую (напр. 1.2.3.4/32) — для отладки, чтобы не рвать свои соединения")
+	flag.StringVar(&o.rules, "rules", strings.Join(cfg.Routing.Rules, ";"), "правила роутинга через ; (напр. \"dom:youtube.com=chain;port:443=eu\"); пусто → весь трафик через выход по умолчанию")
+	flag.StringVar(&o.routeDef, "route-default", cfg.Routing.Default, "метка выхода по умолчанию (нет совпадений правил)")
 	pprofAddr := flag.String("pprof", "", "адрес pprof (напр. localhost:6061); пусто → выкл")
 	flag.Parse()
 	if o.authority == "" {
@@ -121,6 +137,23 @@ func firstNonEmpty(a, b string) string {
 		return a
 	}
 	return b
+}
+
+// entryAddr/entrySNI берут первую точку входа из настроек. Список приезжает
+// подпиской (резервные адреса на случай блокировки), перебор по нему появится
+// вместе с ней — пока используем первую.
+func entryAddr(cfg config.Config) string {
+	if len(cfg.Node.Entries) == 0 {
+		return ""
+	}
+	return cfg.Node.Entries[0].Addr
+}
+
+func entrySNI(cfg config.Config) string {
+	if len(cfg.Node.Entries) == 0 {
+		return ""
+	}
+	return cfg.Node.Entries[0].SNI
 }
 
 // Границы паузы между попытками переподключения.

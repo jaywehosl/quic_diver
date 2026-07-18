@@ -116,8 +116,13 @@ func Run(ctx context.Context, cfg Config) error {
 		router = netstack.Single(cfg.Dialer)
 	}
 
+	// Витрина одна на оба транспорта. Общий экземпляр принципиален: таблица
+	// лимита у него внутри, а браузер после Alt-Svc уходит на HTTP/3 — с
+	// отдельными экземплярами лимит обходился бы простой сменой протокола.
+	site := decoy.NewSite(udpAddr.Port)
+
 	mux := http.NewServeMux()
-	mux.Handle("/", decoy.Handler()) // всё прочее — decoy
+	mux.Handle("/", site) // всё прочее — витрина (та же, что на TCP: лимит общий)
 
 	// DoH (RFC 8484) в том же HTTP/3-соединении, что и туннель: DNS клиента едет
 	// внутри QUIC, провайдеру его не видно и подменить нечего.
@@ -126,7 +131,7 @@ func Run(ctx context.Context, cfg Config) error {
 		mux.Handle(cfg.DNSPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// DNS — только для своих: иначе узел станет открытым DoH-резолвером.
 			if !sessionAllowed(r.Context(), cfg) {
-				decoy.Handler().ServeHTTP(w, r)
+				site.ServeHTTP(w, r)
 				return
 			}
 			doh.ServeHTTP(w, r)
@@ -153,7 +158,7 @@ func Run(ctx context.Context, cfg Config) error {
 	if cfg.OutboundsPath != "" && cfg.Outbounds != nil {
 		mux.HandleFunc(cfg.OutboundsPath, func(w http.ResponseWriter, r *http.Request) {
 			if !sessionAllowed(r.Context(), cfg) {
-				decoy.Handler().ServeHTTP(w, r)
+				site.ServeHTTP(w, r)
 				return
 			}
 			writeJSON(w, cfg.Outbounds.Public())
@@ -174,7 +179,7 @@ func Run(ctx context.Context, cfg Config) error {
 			sess := auth.SessionFrom(r.Context())
 			tok := auth.TokenFromRequest(r)
 			if sess == nil || tok == "" || !authorize(r.Context(), cfg, sess, tok) {
-				decoy.Handler().ServeHTTP(w, r)
+				site.ServeHTTP(w, r)
 				return
 			}
 			w.WriteHeader(http.StatusNoContent)
@@ -183,19 +188,19 @@ func Run(ctx context.Context, cfg Config) error {
 
 	mux.HandleFunc(cfg.ConnectIPPath, func(w http.ResponseWriter, r *http.Request) {
 		if !sessionAllowed(r.Context(), cfg) {
-			decoy.Handler().ServeHTTP(w, r)
+			site.ServeHTTP(w, r)
 			return
 		}
 		assign, err := assignFor(r.Context(), cfg)
 		if err != nil {
 			// пул исчерпан или БД сбоит — не выдаём себя, роняем как decoy
-			decoy.Handler().ServeHTTP(w, r)
+			site.ServeHTTP(w, r)
 			return
 		}
 		req, err := connectip.ParseRequest(r, tmpl)
 		if err != nil {
 			// не валидный connect-ip запрос → decoy, не выдавать себя
-			decoy.Handler().ServeHTTP(w, r)
+			site.ServeHTTP(w, r)
 			return
 		}
 		conn, err := proxy.Proxy(w, req)
@@ -266,7 +271,7 @@ func Run(ctx context.Context, cfg Config) error {
 	// Витрина на TCP: тот же порт, тот же сертификат, та же страница. Без неё узел
 	// слушает только UDP — а домен, чей HTTPS не отвечает по TCP при живом QUIC,
 	// сам себя выдаёт при активном пробинге (см. decoy.Site).
-	tcpSrv, tcpErr := serveDecoyTCP(ctx, cfg, udpAddr.Port)
+	tcpSrv, tcpErr := serveDecoyTCP(ctx, cfg, site)
 
 	go func() {
 		<-ctx.Done()
@@ -293,7 +298,7 @@ func Run(ctx context.Context, cfg Config) error {
 // Узел работает и без неё (возвращаем nil при ошибке — обычно порт занят), но
 // тогда остаётся маркер: QUIC на порту есть, TCP молчит. Поэтому неудачу
 // логируем громко, а не глотаем.
-func serveDecoyTCP(ctx context.Context, cfg Config, port int) (*http.Server, <-chan error) {
+func serveDecoyTCP(ctx context.Context, cfg Config, site *decoy.Site) (*http.Server, <-chan error) {
 	errc := make(chan error, 1)
 	if cfg.TLS == nil {
 		log.Print("витрина TCP: нет TLS-конфига, пропускаю (узел виден только по UDP)")
@@ -311,7 +316,7 @@ func serveDecoyTCP(ctx context.Context, cfg Config, port int) (*http.Server, <-c
 	tlsConf.NextProtos = []string{"h2", "http/1.1"}
 
 	srv := &http.Server{
-		Handler:           decoy.NewSite(port),
+		Handler:           site,
 		TLSConfig:         tlsConf,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,
@@ -324,7 +329,7 @@ func serveDecoyTCP(ctx context.Context, cfg Config, port int) (*http.Server, <-c
 		}
 		errc <- err
 	}()
-	log.Printf("витрина на TCP %s (H1+H2, Alt-Svc h3=\":%d\")", cfg.Listen, port)
+	log.Printf("витрина на TCP %s (H1+H2, лимит общий с HTTP/3)", cfg.Listen)
 	return srv, errc
 }
 
@@ -398,6 +403,8 @@ func serveConnect(w http.ResponseWriter, r *http.Request, cfg Config) {
 	// себя. Вниз в Dialer передаём уменьшенный остаток — для следующего узла.
 	hops, fromClient := chain.HopsFromRequest(r)
 	if !fromClient && hops <= 0 {
+		// Петля между узлами: отвечаем как обычной странице, не выдавая себя.
+		// Лимит витрины тут не нужен — это внутренний путь, не публичный.
 		decoy.Handler().ServeHTTP(w, r)
 		return
 	}

@@ -32,6 +32,8 @@ type options struct {
 	mtu         int    // MTU локального стека (≤ MTU интерфейса; PPPoE обычно 1480)
 	brutalMbps  int    // congestion: слать с этой полосой, игнорируя потери (0 — Cubic)
 	bypass      string // доп-префиксы в обход перехвата (через запятую) — для отладки
+	rules       string // правила роутинга: "dom:youtube.com=chain;port:443=eu" (до веб-юи)
+	routeDef    string // выход по умолчанию (нет совпадений правил)
 }
 
 // Встроенные параметры для «боевой» сборки: задаются линковщиком
@@ -69,6 +71,8 @@ func main() {
 	flag.IntVar(&o.mtu, "mtu", 1500, "MTU локального стека; инжект идёт в интерфейс (у него обычно 1500), а не в PPPoE-путь")
 	flag.IntVar(&o.brutalMbps, "brutal", 0, "слать с полосой N Мбит/с, игнорируя потери (0 — обычный Cubic); ставить НИЖЕ реальной полосы отдачи")
 	flag.StringVar(&o.bypass, "bypass", "", "доп-префиксы в обход перехвата через запятую (напр. 1.2.3.4/32) — для отладки, чтобы не рвать свои соединения")
+	flag.StringVar(&o.rules, "rules", "", "правила роутинга через ; (напр. \"dom:youtube.com=chain;port:443=eu\"); пусто → весь трафик через выход по умолчанию")
+	flag.StringVar(&o.routeDef, "route-default", "direct", "метка выхода по умолчанию (нет совпадений правил)")
 	pprofAddr := flag.String("pprof", "", "адрес pprof (напр. localhost:6061); пусто → выкл")
 	flag.Parse()
 	if o.authority == "" {

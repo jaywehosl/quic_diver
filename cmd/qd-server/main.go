@@ -126,6 +126,7 @@ func main() {
 		AuthPath:           "/qd-auth",
 		AdminPath:          "/qd-admin/dns",
 		AdminOutboundsPath: "/qd-admin/outbounds",
+		OutboundsPath:      "/qd-outbounds",
 		Store:              storeOrNil(store),
 		Pool:               poolFor(store, *poolCIDR),
 		TLS:                tlsConf,

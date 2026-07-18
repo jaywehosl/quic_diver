@@ -147,3 +147,29 @@ func TestConntrackSweep(t *testing.T) {
 		t.Fatalf("после sweep len=%d", ct.Len())
 	}
 }
+
+func TestParseRules(t *testing.T) {
+	rules, err := ParseRules("dom:youtube.com=chain; proc:telegram.exe=eu; cidr:10.0.0.0/8=lan; port:443=https")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 4 {
+		t.Fatalf("правил %d, ожидалось 4", len(rules))
+	}
+	if rules[0].Match.Domain != "youtube.com" || rules[0].Out != "chain" {
+		t.Fatalf("dom: %+v", rules[0])
+	}
+	if rules[2].Match.CIDR.String() != "10.0.0.0/8" {
+		t.Fatalf("cidr: %+v", rules[2])
+	}
+	if rules[3].Match.Port != 443 {
+		t.Fatalf("port: %+v", rules[3])
+	}
+	// битое
+	if _, err := ParseRules("bad:x=y"); err == nil {
+		t.Fatal("неизвестный матчер принят")
+	}
+	if _, err := ParseRules("port:notanumber=x"); err == nil {
+		t.Fatal("битый порт принят")
+	}
+}

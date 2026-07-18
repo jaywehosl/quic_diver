@@ -77,6 +77,9 @@ type Config struct {
 	AdminPath string
 	// AdminOutboundsPath — путь admin-API выходов, обычно "/qd-admin/outbounds".
 	AdminOutboundsPath string
+	// OutboundsPath — путь публикации выходов клиенту (метка+подсеть),
+	// обычно "/qd-outbounds". Доступ авторизованному клиенту, секреты не отдаются.
+	OutboundsPath string
 }
 
 // Template строит URI Template connect-ip эндпоинта. Клиент и узел обязаны
@@ -142,6 +145,20 @@ func Run(ctx context.Context, cfg Config) error {
 	if cfg.AdminOutboundsPath != "" && cfg.Outbounds != nil {
 		mux.Handle(cfg.AdminOutboundsPath, adminOutbounds(cfg))
 		log.Printf("admin-API выходов на %s", cfg.AdminOutboundsPath)
+	}
+
+	// Публикация выходов клиенту (метка+подсеть, без секретов) — по ним клиент
+	// строит соответствие «метка правила → src/Qd-Route». Доступ любому своему
+	// (авторизованному), не только admin: клиенту это нужно для роутинга.
+	if cfg.OutboundsPath != "" && cfg.Outbounds != nil {
+		mux.HandleFunc(cfg.OutboundsPath, func(w http.ResponseWriter, r *http.Request) {
+			if !sessionAllowed(r.Context(), cfg) {
+				decoy.Handler().ServeHTTP(w, r)
+				return
+			}
+			writeJSON(w, cfg.Outbounds.Public())
+		})
+		log.Printf("выходы клиенту на %s", cfg.OutboundsPath)
 	}
 	// Авторизация сессии: клиент предъявляет токен ДО connect-ip. Проверяем один
 	// раз на QUIC-сессию — connect-ip и все CONNECT-стримы идут по ней же и

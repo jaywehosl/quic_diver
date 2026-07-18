@@ -169,6 +169,26 @@ func (o *Outbounds) Labels() []string {
 	return out
 }
 
+// PublicOutbound — выход, каким его видит клиент: метка и подсеть (адреса, с
+// которых слать, чтобы попасть в этот выход). Секреты (chain-токен, upstream) НЕ
+// раскрываются — клиенту они не нужны, он лишь метит трафик.
+type PublicOutbound struct {
+	Label  string `json:"label"`
+	Subnet string `json:"subnet"`
+}
+
+// Public — выходы для клиента (метка+подсеть). По ним клиент строит соответствие
+// «метка правила → src-подсеть (UDP) / Qd-Route (TCP)».
+func (o *Outbounds) Public() []PublicOutbound {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	out := make([]PublicOutbound, 0, len(o.list))
+	for i := range o.list {
+		out = append(out, PublicOutbound{Label: o.list[i].Label, Subnet: o.list[i].Subnet.String()})
+	}
+	return out
+}
+
 // Close закрывает все chain-клиенты.
 func (o *Outbounds) Close() {
 	o.mu.Lock()

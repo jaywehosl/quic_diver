@@ -19,6 +19,8 @@ import (
 	"quicdiver/internal/client/nat"
 	"quicdiver/internal/client/nat46"
 	"quicdiver/internal/client/netwatch"
+	"quicdiver/internal/client/routeclient"
+	"quicdiver/internal/client/routing"
 	"quicdiver/internal/client/supervisor"
 	"quicdiver/internal/client/sysdns"
 	"quicdiver/internal/client/sysproxy"
@@ -198,6 +200,18 @@ func run(ctx context.Context, o options) error {
 		var dialer netstack.Dialer = connectdial.Dialer{CC: client.H3Conn()}
 		if v6 != nil {
 			dialer = nat46.Dialer{Inner: connectdial.Dialer{CC: client.H3Conn()}, Table: v6}
+		}
+		// Правила роутинга: TCP-флоу метится выходом (Qd-Route), узел следует
+		// метке. Пока по dst (CIDR/порт/домен); процесс и src-подсеть для UDP —
+		// следующие шаги. nat46-композиция при -rules отложена (взаимоисключимы).
+		if o.rules != "" {
+			parsed, err := routing.ParseRules(o.rules)
+			if err != nil {
+				return fmt.Errorf("правила: %w", err)
+			}
+			router := routing.NewRouter(routing.Compile(parsed, o.routeDef))
+			dialer = routeclient.Dialer{CC: client.H3Conn(), Router: router, Default: o.routeDef}
+			log.Printf("роутинг: %d правил, по умолчанию %q", len(parsed), o.routeDef)
 		}
 		ns, err := netstack.NewWithMTU(dialer, o.mtu)
 		if err != nil {

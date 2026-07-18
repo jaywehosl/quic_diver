@@ -18,47 +18,60 @@ import (
 	"quicdiver/internal/client/routing"
 )
 
-// DomainResolver отдаёт домен по адресу назначения (из fake-IP/DNS), если знает.
-// Пусто — домен неизвестен, доменные правила по этому флоу не сработают.
-type DomainResolver interface {
+// FakeResolver отдаёт домен и реальный адрес по фиктивному (fakeip.Pool). Домен
+// нужен для доменных правил, реальный адрес — для подмены fake перед дозвоном
+// (fake не маршрутизируется, узел должен идти на настоящий адрес).
+type FakeResolver interface {
 	DomainOf(addr netip.Addr) string
+	RealAddr(fake netip.Addr) (netip.Addr, bool)
 }
 
-// Dialer метит TCP-флоу выходом по правилам и открывает CONNECT-стрим.
+// Dialer метит TCP-флоу выходом по правилам, подменяет fake→real и открывает
+// CONNECT-стрим.
 type Dialer struct {
 	CC     *http3.ClientConn
 	Router *routing.Router
-	// Domains — источник домена по dst (nat46/DNS). nil → доменные правила не
-	// матчат (только процесс/CIDR/порт).
-	Domains DomainResolver
-	// Default — метка выхода по умолчанию; пустая метка и "direct" в Qd-Route не
-	// кладутся (узел и так выведет через выход по умолчанию).
+	// Fake — источник домена/реального адреса (fakeip.Pool). nil → доменные
+	// правила не матчат, подмена не делается (только CIDR/порт по dst).
+	Fake FakeResolver
+	// Default — метка выхода по умолчанию; пустая и "direct" в Qd-Route не кладутся.
 	Default string
 }
 
-// DialTCP классифицирует флоу и открывает CONNECT-стрим с меткой выхода.
+// DialTCP классифицирует флоу и открывает CONNECT-стрим на реальный адрес с
+// меткой выхода.
 func (d Dialer) DialTCP(ctx context.Context, dst netip.AddrPort) (net.Conn, error) {
-	label := d.classify(dst)
+	real, domain := d.resolve(dst)
+	label := d.classify(real, domain)
+
 	var hdr http.Header
 	if label != "" && label != "direct" {
 		hdr = http.Header{routing.RouteHeaderName: []string{label}}
 	}
-	return connectdial.Dialer{CC: d.CC, Header: hdr}.DialTCP(ctx, dst)
+	return connectdial.Dialer{CC: d.CC, Header: hdr}.DialTCP(ctx, real)
 }
 
-// DialUDP не поддержан в этом диалере: UDP идёт датаграммами (метка = src-адрес),
-// не CONNECT-стримом.
+// DialUDP не поддержан здесь: UDP идёт датаграммами (метка = src-адрес).
 func (d Dialer) DialUDP(ctx context.Context, dst netip.AddrPort) (net.Conn, error) {
 	return connectdial.Dialer{CC: d.CC}.DialUDP(ctx, dst)
 }
 
-func (d Dialer) classify(dst netip.AddrPort) string {
+// resolve превращает fake-адрес в реальный и достаёт домен. Не-fake dst проходит
+// как есть (домен неизвестен — сработают CIDR/порт).
+func (d Dialer) resolve(dst netip.AddrPort) (real netip.AddrPort, domain string) {
+	if d.Fake == nil {
+		return dst, ""
+	}
+	domain = d.Fake.DomainOf(dst.Addr())
+	if ra, ok := d.Fake.RealAddr(dst.Addr()); ok {
+		return netip.AddrPortFrom(ra, dst.Port()), domain
+	}
+	return dst, domain
+}
+
+func (d Dialer) classify(real netip.AddrPort, domain string) string {
 	if d.Router == nil {
 		return d.Default
 	}
-	f := routing.Flow{Dst: dst}
-	if d.Domains != nil {
-		f.Domain = d.Domains.DomainOf(dst.Addr())
-	}
-	return d.Router.Classify(f)
+	return d.Router.Classify(routing.Flow{Dst: real, Domain: domain})
 }

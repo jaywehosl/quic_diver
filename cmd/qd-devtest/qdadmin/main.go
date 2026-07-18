@@ -43,6 +43,11 @@ func main() {
 	chainAuth := flag.String("chain-authority", "", "authority chain-выхода")
 	chainTok := flag.String("chain-token", "", "node-токен chain-выхода")
 	delOut := flag.String("del-outbound", "", "удалить выход по label")
+	// Универсальный вызов: под каждый новый admin-эндпоинт заводить свой флаг —
+	// плодить сущности, а API растёт (клиенты, сессии, состояние узла).
+	path := flag.String("path", "", "произвольный admin-путь, напр. /qd-admin/users")
+	method := flag.String("method", http.MethodGet, "метод для -path")
+	reqBody := flag.String("body", "", "тело запроса (json) для -path")
 	flag.Parse()
 
 	if *authority == "" {
@@ -67,6 +72,15 @@ func main() {
 
 	if err := doAuth(ctx, cc, *authority, *token); err != nil {
 		log.Fatalf("auth: %v", err)
+	}
+
+	if *path != "" {
+		var b []byte
+		if *reqBody != "" {
+			b = []byte(*reqBody)
+		}
+		show(ctx, cc, strings.ToUpper(*method), "https://"+*authority+*path, b)
+		return
 	}
 
 	obURL := "https://" + *authority + "/qd-admin/outbounds"

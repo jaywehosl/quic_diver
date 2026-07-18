@@ -77,7 +77,63 @@ CREATE TABLE IF NOT EXISTS outbounds (
 	enabled    INTEGER NOT NULL DEFAULT 1,
 	updated_at INTEGER NOT NULL
 );
+
+-- Устройства клиента. Против шаринга токена: их число ограничено (limit_devices
+-- у токена), лишние админ отзывает поимённо.
+--
+-- hwid считает КЛИЕНТ, поэтому пропатченный клиент его подделает — это заслон от
+-- бытового шаринга, а не защита. Настоящий предел ставит учёт сессий ниже.
+CREATE TABLE IF NOT EXISTS devices (
+	token_hash TEXT NOT NULL REFERENCES tokens(hash) ON DELETE CASCADE,
+	hwid       TEXT NOT NULL,               -- отпечаток машины, считает клиент
+	label      TEXT NOT NULL DEFAULT '',    -- имя от пользователя (для панели)
+	first_seen INTEGER NOT NULL,
+	last_seen  INTEGER NOT NULL,
+	last_ip    TEXT NOT NULL DEFAULT '',
+	revoked    INTEGER NOT NULL DEFAULT 0,  -- tombstone: не пускать это устройство
+	updated_at INTEGER NOT NULL,
+	PRIMARY KEY (token_hash, hwid)
+);
+CREATE INDEX IF NOT EXISTS devices_token ON devices(token_hash);
+
+-- Активные сессии: кто подключён прямо сейчас и с какого адреса. Живут недолго,
+-- их чистит узел; нужны для «показать активные сессии» и для лимита по IP,
+-- который работает даже с подделанным hwid.
+CREATE TABLE IF NOT EXISTS sessions (
+	id         TEXT PRIMARY KEY,            -- случайный идентификатор сессии
+	token_hash TEXT NOT NULL REFERENCES tokens(hash) ON DELETE CASCADE,
+	hwid       TEXT NOT NULL DEFAULT '',
+	remote_ip  TEXT NOT NULL DEFAULT '',
+	node       TEXT NOT NULL DEFAULT '',    -- какой узел обслуживает (для сети нод)
+	started_at INTEGER NOT NULL,
+	last_seen  INTEGER NOT NULL,
+	bytes_in   INTEGER NOT NULL DEFAULT 0,
+	bytes_out  INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS sessions_token ON sessions(token_hash);
+CREATE INDEX IF NOT EXISTS sessions_seen ON sessions(last_seen);
+
+-- Накопленный трафик по клиенту. Отдельно от сессий: те приходят и уходят, а
+-- счётчик обязан пережить и обрыв, и перезапуск узла.
+CREATE TABLE IF NOT EXISTS traffic (
+	token_hash TEXT PRIMARY KEY REFERENCES tokens(hash) ON DELETE CASCADE,
+	bytes_in   INTEGER NOT NULL DEFAULT 0,
+	bytes_out  INTEGER NOT NULL DEFAULT 0,
+	updated_at INTEGER NOT NULL
+);
 `
+
+// migrations — доводка схемы на уже существующих БД. ALTER TABLE в SQLite не
+// умеет IF NOT EXISTS, поэтому ошибку «столбец уже есть» глотаем: гонять этот
+// список на каждом старте безопасно.
+var migrations = []string{
+	// Сколько устройств разрешено токену. 0 — без ограничения.
+	`ALTER TABLE tokens ADD COLUMN limit_devices INTEGER NOT NULL DEFAULT 0`,
+	// Предел одновременных сессий. Работает даже там, где hwid подделан.
+	`ALTER TABLE tokens ADD COLUMN limit_sessions INTEGER NOT NULL DEFAULT 0`,
+	// До какого момента токен действителен (unix-наносекунды, 0 — бессрочно).
+	`ALTER TABLE tokens ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0`,
+}
 
 // Open открывает (создаёт) БД по пути и накатывает схему.
 func Open(path string) (*SQLite, error) {
@@ -95,6 +151,12 @@ func Open(path string) (*SQLite, error) {
 	if _, err := sdb.ExecContext(context.Background(), schema); err != nil {
 		sdb.Close()
 		return nil, fmt.Errorf("схема: %w", err)
+	}
+	// Доводка старых БД. Ошибки глотаем осознанно: единственная ожидаемая — это
+	// «столбец уже существует» на свежей базе, а падать из-за неё нельзя, иначе
+	// узел не поднимется после обновления.
+	for _, m := range migrations {
+		_, _ = sdb.ExecContext(context.Background(), m)
 	}
 	return &SQLite{db: sdb, path: path}, nil
 }

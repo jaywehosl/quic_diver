@@ -77,6 +77,12 @@ type Config struct {
 	AdminPath string
 	// AdminOutboundsPath — путь admin-API выходов, обычно "/qd-admin/outbounds".
 	AdminOutboundsPath string
+	// AdminUsersPath — путь admin-API учёта клиентов, обычно "/qd-admin/users".
+	AdminUsersPath string
+	// AdminSessionsPath — путь admin-API живых сессий, обычно "/qd-admin/sessions".
+	AdminSessionsPath string
+	// AdminStatsPath — путь admin-API состояния узла, обычно "/qd-admin/stats".
+	AdminStatsPath string
 	// OutboundsPath — путь публикации выходов клиенту (метка+подсеть),
 	// обычно "/qd-outbounds". Доступ авторизованному клиенту, секреты не отдаются.
 	OutboundsPath string
@@ -150,6 +156,27 @@ func Run(ctx context.Context, cfg Config) error {
 	if cfg.AdminOutboundsPath != "" && cfg.Outbounds != nil {
 		mux.Handle(cfg.AdminOutboundsPath, adminOutbounds(cfg))
 		log.Printf("admin-API выходов на %s", cfg.AdminOutboundsPath)
+	}
+
+	// Учёт клиентов: раньше жил только в CLI узла, то есть требовал ssh. Панель
+	// должна уметь то же удалённо — и через туннель, а не отдельным портом.
+	if cfg.AdminUsersPath != "" && cfg.Store != nil {
+		mux.Handle(cfg.AdminUsersPath, adminUsers(cfg))
+		log.Printf("admin-API клиентов на %s", cfg.AdminUsersPath)
+	}
+	if cfg.AdminSessionsPath != "" && cfg.Store != nil {
+		mux.Handle(cfg.AdminSessionsPath, adminSessions(cfg))
+		log.Printf("admin-API сессий на %s", cfg.AdminSessionsPath)
+	}
+	if cfg.AdminStatsPath != "" {
+		mux.Handle(cfg.AdminStatsPath, adminStats(cfg))
+		log.Printf("admin-API состояния на %s", cfg.AdminStatsPath)
+	}
+	// Уборка сессий, о которых давно не слышно: узел мог умереть, не закрыв их,
+	// и тогда «активные сессии» превратились бы в кладбище, а лимит
+	// одновременных подключений заклинило бы навсегда.
+	if store, ok := cfg.Store.(*db.SQLite); ok {
+		go sweepSessions(ctx, store)
 	}
 
 	// Публикация выходов клиенту (метка+подсеть, без секретов) — по ним клиент

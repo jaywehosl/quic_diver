@@ -69,6 +69,69 @@ func TestRateLimitBansFlood(t *testing.T) {
 	}
 }
 
+// Страница лимита оформлена как сайт: голый текст от net/http выдал бы, что за
+// доменом заглушка, а не живой ресурс.
+func TestRateLimitPageLooksLikeSite(t *testing.T) {
+	s := NewSite(443)
+	const ip = "7.7.7.7"
+	for i := 0; i < defaultBurst+1; i++ {
+		s.ServeHTTP(httptest.NewRecorder(), req("/", ip))
+	}
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, req("/", ip))
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("статус %d, ожидался 429", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "<!doctype html>") || !strings.Contains(body, "Too many requests") {
+		t.Fatalf("страница 429 не в общем оформлении: %.120q", body)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Fatalf("Content-Type = %q, ожидался text/html", ct)
+	}
+}
+
+// Настоящий сайт отвечает 404 на произвольный путь. Одна и та же страница на
+// любой URL — признак заглушки.
+func TestUnknownPathIsStyled404(t *testing.T) {
+	w := httptest.NewRecorder()
+	NewSite(443).ServeHTTP(w, req("/wp-admin/", "1.2.3.4"))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("статус %d на произвольный путь, ожидался 404", w.Code)
+	}
+	if body := w.Body.String(); !strings.Contains(body, "Not found") || !strings.Contains(body, "<!doctype html>") {
+		t.Fatalf("404 не в общем оформлении: %.120q", body)
+	}
+}
+
+// Фавикон отдаётся с кэшем и НЕ съедает квоту: браузер просит его на каждой
+// странице, из-за чего живой посетитель упирался в лимит с пятого обновления.
+func TestFaviconCachedAndFree(t *testing.T) {
+	s := NewSite(443)
+	const ip = "3.3.3.3"
+	for i := 0; i < defaultBurst*2; i++ {
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, req("/favicon.ico", ip))
+		if w.Code != http.StatusOK {
+			t.Fatalf("favicon получил %d на запросе %d — считается в лимит", w.Code, i+1)
+		}
+	}
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, req("/favicon.ico", ip))
+	if cc := w.Header().Get("Cache-Control"); !strings.Contains(cc, "max-age") {
+		t.Fatalf("Cache-Control = %q — браузер будет просить фавикон снова и снова", cc)
+	}
+	if w.Body.Len() == 0 {
+		t.Fatal("фавикон пуст")
+	}
+	// Обычная страница после этого всё ещё доступна.
+	w = httptest.NewRecorder()
+	s.ServeHTTP(w, req("/", ip))
+	if w.Code != http.StatusOK {
+		t.Fatalf("страница получила %d — фавикон всё-таки съел квоту", w.Code)
+	}
+}
+
 // Лимит персональный: сосед по адресу не должен страдать от чужого флуда.
 func TestRateLimitIsPerAddress(t *testing.T) {
 	s := NewSite(443)

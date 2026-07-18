@@ -26,13 +26,27 @@ type Site struct {
 	page   http.Handler
 }
 
-// Значения по умолчанию: пара обновлений страницы живому человеку не мешает,
-// а перебор быстро упирается в лимит.
+// Значения по умолчанию. Считать надо в ЗАПРОСАХ, а не в «обновлениях
+// страницы»: браузер на одно F5 тянет ещё favicon, а после Alt-Svc держит
+// параллельно TCP и HTTP/3 — при лимите 20 живой человек упирался в него
+// с пятого обновления. 60/мин даёт запас обычному посетителю и всё равно
+// быстро осаживает перебор.
 const (
-	defaultBurst  = 20               // запросов с адреса за окно
+	defaultBurst  = 60               // запросов с адреса за окно
 	defaultWindow = time.Minute      // окно учёта
 	defaultBan    = 60 * time.Second // сколько «курить» после перебора
 )
+
+// favicon — прозрачный PNG 1×1. Браузер просит /favicon.ico на каждой странице;
+// без ответа он долбит его снова и снова, съедая лимит живому посетителю.
+// Отдаём с длинным кэшем, чтобы спросил один раз.
+var favicon = []byte{
+	0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 'I', 'H', 'D', 'R',
+	0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+	0x89, 0x00, 0x00, 0x00, 0x0a, 'I', 'D', 'A', 'T', 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
+	0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 'I', 'E', 'N', 'D',
+	0xae, 0x42, 0x60, 0x82,
+}
 
 // NewSite строит витрину. altSvcPort — порт, на котором узел слушает QUIC:
 // он уходит в Alt-Svc, делая HTTP/3 на этом порту естественным продолжением
@@ -52,15 +66,32 @@ func (s *Site) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Ни поисковикам, ни архиваторам здесь делать нечего.
 	h.Set("X-Robots-Tag", "noindex, nofollow, noarchive")
 
-	if r.URL.Path == "/robots.txt" {
+	// Фавикон и robots — до лимита: это служебные запросы браузера и краулеров,
+	// они не должны съедать квоту живого посетителя.
+	switch r.URL.Path {
+	case "/robots.txt":
 		h.Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte("User-agent: *\nDisallow: /\n"))
+		return
+	case "/favicon.ico":
+		h.Set("Content-Type", "image/png")
+		h.Set("Cache-Control", "public, max-age=86400")
+		_, _ = w.Write(favicon)
 		return
 	}
 
 	if retry, ok := s.lim.allow(clientIP(r), time.Now()); !ok {
 		h.Set("Retry-After", strconv.Itoa(int(retry.Seconds())))
-		http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
+		writePage(w, http.StatusTooManyRequests, "Too many requests",
+			"You are sending requests too quickly. Please wait a moment and try again.")
+		return
+	}
+
+	// Настоящий сайт не отдаёт главную на произвольный URL — он отвечает 404.
+	// Отдавая одну и ту же страницу на любой путь, узел выдавал бы заглушку.
+	if r.URL.Path != "/" {
+		writePage(w, http.StatusNotFound, "Not found",
+			"The page you requested does not exist.")
 		return
 	}
 	s.page.ServeHTTP(w, r)

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"quicdiver/internal/client/config"
+	"quicdiver/internal/client/service"
 )
 
 type options struct {
@@ -127,7 +128,9 @@ func main() {
 		defer holdOnExit()
 	}
 
-	serve(ctx, o)
+	// Вшитая боевая сборка запускается двойным кликом и обязана подключаться
+	// сама: у пользователя нет ни консоли, ни (пока) панели.
+	serveService(ctx, o, cfg.Autoconnect || builtinServer != "")
 	log.Print("остановлен")
 }
 
@@ -156,60 +159,29 @@ func entrySNI(cfg config.Config) string {
 	return cfg.Node.Entries[0].SNI
 }
 
-// Границы паузы между попытками переподключения.
+// serveService держит процесс живым и управляет сессией через service.Service.
 //
-// Потолок низкий намеренно: сюда попадаем, только когда путь не удалось починить
-// переездом и сессия всё-таки умерла. Связь к этому моменту может вернуться в
-// любую секунду, и ждать полминуты, когда интернет уже есть, — ровно то, что
-// пользователь замечает как «висит».
-const (
-	minBackoff = time.Second
-	maxBackoff = 5 * time.Second
-	// stableRun — сколько сессия должна прожить, чтобы счесть её удавшейся и
-	// сбросить паузу. Иначе после долгой работы первый же обрыв ждал бы полминуты.
-	stableRun = time.Minute
-)
+// Сервис и сессия разделены: процесс работает всегда (дальше он будет отдавать
+// веб-панель), а туннель с перехватом включается отдельно. Пока панели нет,
+// сессия поднимается сразу при autoconnect — иначе клиент просто висел бы.
+func serveService(ctx context.Context, o options, autoconnect bool) {
+	svc := service.New(func(sctx context.Context) error { return run(sctx, o) }, service.DefaultBackoff())
 
-// serve держит клиента поднятым: сессия умерла — поднимаем заново (arch4).
-//
-// Миграция спасает от смены адреса, но не от всего: если роутер пересобрал PPPoE,
-// локальный адрес не менялся, а публичный сменился — NAT-маппинг слетел, ответы
-// узла не доходят, и сессия умирает по idle-таймауту. Раньше на этом клиент просто
-// падал (log.Fatal) и пользователь оставался без сети до ручного перезапуска.
-//
-// Пересоздаём весь стек, а не только сессию: со смертью QUIC умерли и все
-// CONNECT-стримы, то есть соединения приложений оборваны в любом случае. Выход из
-// run вернёт системе прокси и DNS, поэтому следующий резолв домена узла пойдёт
-// через настоящий DNS провайдера, а не через наш уже неживой listener.
-func serve(ctx context.Context, o options) { serveWith(ctx, o, run) }
+	if autoconnect {
+		if err := svc.Connect(ctx); err != nil {
+			log.Printf("подключение: %v", err)
+		}
+	} else {
+		log.Print("сервис поднят, трафик не заворачивается (автоподключение выключено)")
+	}
 
-// serveWith — та же петля с подставным запуском (для тестов).
-func serveWith(ctx context.Context, o options, runFn func(context.Context, options) error) {
-	backoff := minBackoff
-	for attempt := 1; ctx.Err() == nil; attempt++ {
-		start := time.Now()
-		err := runFn(ctx, o)
-		lived := time.Since(start)
+	<-ctx.Done()
 
-		if ctx.Err() != nil {
-			return // штатная остановка по Ctrl+C
-		}
-		if err == nil {
-			return
-		}
-		if lived >= stableRun {
-			backoff = minBackoff // сессия работала долго — обрыв разовый
-		}
-		log.Printf("сессия оборвалась после %v: %v", lived.Round(time.Second), err)
-		log.Printf("переподключение через %v (попытка %d)", backoff, attempt)
-
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(backoff):
-		}
-		if backoff *= 2; backoff > maxBackoff {
-			backoff = maxBackoff
-		}
+	// Гасим сессию явно и ждём уборку: она возвращает системный DNS и прокси.
+	// Уйти раньше — оставить машину с нашими настройками и без сети.
+	stopCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := svc.Disconnect(stopCtx); err != nil {
+		log.Printf("остановка: %v", err)
 	}
 }

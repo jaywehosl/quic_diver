@@ -50,43 +50,4 @@ func TestAddrsForHostSharesNumber(t *testing.T) {
 	}
 }
 
-// Роутер по src: адрес из chain-подсети → chain-выход, иначе direct.
-func TestSrcRouterPicksBySubnet(t *testing.T) {
-	subs := SplitPool(netip.MustParsePrefix("10.9.0.0/16"), 2)
-	outs := []Outbound{
-		{Label: "direct", Subnet: subs[0], Dialer: markDialer{"direct"}},
-		{Label: "chain", Subnet: subs[1], Dialer: markDialer{"chain"}},
-	}
-	r := newRouter(outs)
-
-	if got := r.For(netip.MustParseAddr("10.9.0.5")).(markDialer).mark; got != "direct" {
-		t.Fatalf("src из direct-подсети → %q", got)
-	}
-	if got := r.For(netip.MustParseAddr("10.9.128.5")).(markDialer).mark; got != "chain" {
-		t.Fatalf("src из chain-подсети → %q", got)
-	}
-	// неизвестный src → fallback (direct)
-	if got := r.For(netip.MustParseAddr("192.168.1.1")).(markDialer).mark; got != "direct" {
-		t.Fatalf("неизвестный src → %q, ожидался fallback direct", got)
-	}
-}
-
-// Роутер по метке (TCP-CONNECT): Qd-Route → нужный выход, пусто → direct.
-func TestOutboundDialerByLabel(t *testing.T) {
-	subs := SplitPool(netip.MustParsePrefix("10.9.0.0/16"), 2)
-	cfg := Config{Outbounds: []Outbound{
-		{Label: "direct", Subnet: subs[0], Dialer: markDialer{"direct"}},
-		{Label: "chain", Subnet: subs[1], Dialer: markDialer{"chain"}},
-	}}
-	if got := cfg.outboundDialer("chain").(markDialer).mark; got != "chain" {
-		t.Fatalf("метка chain → %q", got)
-	}
-	if got := cfg.outboundDialer("").(markDialer).mark; got != "direct" {
-		t.Fatalf("пустая метка → %q, ожидался direct", got)
-	}
-	if got := cfg.outboundDialer("несуществует").(markDialer).mark; got != "direct" {
-		t.Fatalf("неизвестная метка → %q, ожидался direct", got)
-	}
-}
-
-var _ netstack.Router = (*srcRouter)(nil)
+var _ netstack.Router = (*Outbounds)(nil)

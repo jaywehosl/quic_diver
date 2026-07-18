@@ -51,11 +51,14 @@ type Config struct {
 	// Routes — рекламируемые клиенту маршруты (обычно весь IPv4/IPv6).
 	Routes []connectip.IPRoute
 	// Dialer — выход по умолчанию (dev/один выход): direct или chain. Используется,
-	// когда Outbounds пуст.
+	// когда Outbounds == nil.
 	Dialer netstack.Dialer
-	// Outbounds — несколько выходов с роутингом по src-адресу. Клиент получает
-	// адрес в подсети каждого выхода и шлёт с нужного src. Пусто → один Dialer.
-	Outbounds []Outbound
+	// Outbounds — живой набор выходов с роутингом (из БД, перенастраивается admin).
+	// nil → один Dialer без роутинга.
+	Outbounds *Outbounds
+	// OutboundStore — БД для admin-API выходов (Reload после изменения). Обычно =
+	// Store.
+	OutboundStore db.Store
 	// Resolver — DNS узла (кеш + upstream). nil → эндпоинт /dns-query не поднимается.
 	// Резолв обязан идти здесь: у клиента провайдер подменяет ответы на заглушку.
 	Resolver *dns.Resolver
@@ -72,6 +75,8 @@ type Config struct {
 	// AdminPath — путь admin-API (управление резолвером), обычно "/qd-admin/dns".
 	// Пусто → не поднимается. Доступ строго по admin-токену.
 	AdminPath string
+	// AdminOutboundsPath — путь admin-API выходов, обычно "/qd-admin/outbounds".
+	AdminOutboundsPath string
 }
 
 // Template строит URI Template connect-ip эндпоинта. Клиент и узел обязаны
@@ -99,11 +104,11 @@ func Run(ctx context.Context, cfg Config) error {
 	tmpl := Template(cfg.Authority, cfg.ConnectIPPath)
 	proxy := &connectip.Proxy{}
 
-	// Роутер выхода: несколько outbound'ов → выбор по src-адресу; иначе один Dialer.
+	// Роутер выхода: живой набор outbound'ов (выбор по src) либо один Dialer.
 	var router netstack.Router
-	if len(cfg.Outbounds) > 0 {
-		router = newRouter(cfg.Outbounds)
-		log.Printf("роутинг по src: %d выход(ов)", len(cfg.Outbounds))
+	if cfg.Outbounds != nil {
+		router = cfg.Outbounds
+		log.Printf("роутинг по src: выходы %v", cfg.Outbounds.Labels())
 	} else {
 		router = netstack.Single(cfg.Dialer)
 	}
@@ -131,6 +136,12 @@ func Run(ctx context.Context, cfg Config) error {
 			mux.Handle(cfg.AdminPath, adminDNS(cfg))
 			log.Printf("admin-API DNS на %s", cfg.AdminPath)
 		}
+	}
+
+	// Admin-API управления выходами (outbounds CRUD + горячий Reload).
+	if cfg.AdminOutboundsPath != "" && cfg.Outbounds != nil {
+		mux.Handle(cfg.AdminOutboundsPath, adminOutbounds(cfg))
+		log.Printf("admin-API выходов на %s", cfg.AdminOutboundsPath)
 	}
 	// Авторизация сессии: клиент предъявляет токен ДО connect-ip. Проверяем один
 	// раз на QUIC-сессию — connect-ip и все CONNECT-стримы идут по ней же и
@@ -287,11 +298,11 @@ func assignFor(ctx context.Context, cfg Config) ([]netip.Prefix, error) {
 	}
 	// Без роутинга — один /32 (как раньше). С выходами — тот же хост-номер во всех
 	// outbound-подсетях: клиент шлёт с нужного src, узел роутит по подсети.
-	if len(cfg.Outbounds) == 0 {
+	if cfg.Outbounds == nil {
 		return []netip.Prefix{netip.PrefixFrom(addr, addr.BitLen())}, nil
 	}
-	host := hostFromAddr(cfg.Outbounds[0].Subnet, addr)
-	return addrsForHost(cfg.Outbounds, host), nil
+	host := hostFromAddr(cfg.Outbounds.BaseSubnet(), addr)
+	return cfg.Outbounds.AddrsForHost(host), nil
 }
 
 // serveConnect обслуживает CONNECT-туннель одного TCP-флоу: соединяется с
@@ -323,7 +334,10 @@ func serveConnect(w http.ResponseWriter, r *http.Request, cfg Config) {
 	// Выход для этого флоу: TCP идёт CONNECT-стримом (мимо IP-слоя), поэтому метка
 	// маршрута едет заголовком, а не src-адресом (как у датаграмм). Клиент ставит
 	// Qd-Route по своему правилу; пусто/неизвестно → выход по умолчанию (direct).
-	dialer := cfg.outboundDialer(r.Header.Get(RouteHeader))
+	dialer := cfg.Dialer
+	if cfg.Outbounds != nil {
+		dialer = cfg.Outbounds.DialerForLabel(r.Header.Get(RouteHeader))
+	}
 	ctx, cancel := context.WithTimeout(chain.WithHops(r.Context(), hops-1), 15*time.Second)
 	out, err := dialer.DialTCP(ctx, dst)
 	cancel()

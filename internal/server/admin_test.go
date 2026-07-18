@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
 
@@ -94,4 +95,86 @@ func TestAdminDNSBadUpstream(t *testing.T) {
 	if got := cfg.Resolver.Settings().Upstream; got != "udp://1.1.1.1:53" {
 		t.Fatalf("старый upstream затёрт при ошибке: %q", got)
 	}
+}
+
+// API выходов: admin добавляет chain, он появляется активным; удаление убирает.
+func TestAdminOutboundsCRUD(t *testing.T) {
+	store := newMemStore()
+	dials, closes := 0, 0
+	obs := NewOutbounds(netip.MustParsePrefix("10.9.0.0/16"), markDialer{"direct"}, fakeChain(&dials, &closes))
+	_ = obs.Reload(context.Background(), store)
+
+	cfg := Config{Store: fakeStore{}, OutboundStore: store, Outbounds: obs}
+	h := adminOutbounds(cfg)
+
+	// GET: только direct
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, reqWithRole(http.MethodGet, "", auth.RoleAdmin))
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET статус %d", w.Code)
+	}
+	var got []outboundView
+	_ = json.Unmarshal(w.Body.Bytes(), &got)
+	if len(got) != 1 || got[0].Label != "direct" {
+		t.Fatalf("исходно не только direct: %+v", got)
+	}
+
+	// POST: добавить chain "eu"
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, reqWithRole(http.MethodPost,
+		`{"label":"eu","type":"chain","addr":"1.2.3.4:443","token":"qd_node"}`, auth.RoleAdmin))
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST статус %d: %s", w.Code, w.Body)
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &got)
+	var eu *outboundView
+	for i := range got {
+		if got[i].Label == "eu" {
+			eu = &got[i]
+		}
+	}
+	if eu == nil || !eu.Active {
+		t.Fatalf("chain eu не активен: %+v", got)
+	}
+	if eu.HasToken != true {
+		t.Fatal("has_token=false, ожидался true")
+	}
+	// токен НЕ отдаётся в открытую
+	if bytesContains(w.Body.Bytes(), "qd_node") {
+		t.Fatal("токен выхода утёк в ответ API")
+	}
+
+	// роутер знает eu
+	if obs.DialerForLabel("eu").(markDialer).mark != "1.2.3.4:443" {
+		t.Fatal("после POST роутер не знает eu")
+	}
+
+	// DELETE
+	w = httptest.NewRecorder()
+	req := reqWithRole(http.MethodDelete, "", auth.RoleAdmin)
+	req.URL.RawQuery = "label=eu"
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("DELETE статус %d", w.Code)
+	}
+	if obs.DialerForLabel("eu").(markDialer).mark != "direct" {
+		t.Fatal("после DELETE eu ещё в роутере")
+	}
+}
+
+// user-токен в API выходов не пускает.
+func TestAdminOutboundsRequiresAdmin(t *testing.T) {
+	d, c := 0, 0
+	obs := NewOutbounds(netip.MustParsePrefix("10.9.0.0/16"), markDialer{"direct"}, fakeChain(&d, &c))
+	cfg := Config{Store: fakeStore{}, OutboundStore: newMemStore(), Outbounds: obs}
+	h := adminOutbounds(cfg)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, reqWithRole(http.MethodGet, "", auth.RoleUser))
+	if ct := w.Header().Get("Content-Type"); ct == "application/json" {
+		t.Fatal("user получил JSON вместо decoy")
+	}
+}
+
+func bytesContains(b []byte, s string) bool {
+	return strings.Contains(string(b), s)
 }

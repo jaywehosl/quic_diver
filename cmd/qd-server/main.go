@@ -12,6 +12,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -116,18 +117,19 @@ func main() {
 	}
 
 	cfg := server.Config{
-		Listen:        *listen,
-		Authority:     *authority,
-		ConnectIPPath: "/connect-ip",
-		Resolver:      resolver,
-		DNSPath:       "/dns-query",
-		DNSGCEvery:    *dnsGC,
-		AuthPath:      "/qd-auth",
-		AdminPath:     "/qd-admin/dns",
-		Store:         storeOrNil(store),
-		Pool:          poolFor(store, *poolCIDR),
-		TLS:           tlsConf,
-		Assign:        []netip.Prefix{pfx},
+		Listen:             *listen,
+		Authority:          *authority,
+		ConnectIPPath:      "/connect-ip",
+		Resolver:           resolver,
+		DNSPath:            "/dns-query",
+		DNSGCEvery:         *dnsGC,
+		AuthPath:           "/qd-auth",
+		AdminPath:          "/qd-admin/dns",
+		AdminOutboundsPath: "/qd-admin/outbounds",
+		Store:              storeOrNil(store),
+		Pool:               poolFor(store, *poolCIDR),
+		TLS:                tlsConf,
+		Assign:             []netip.Prefix{pfx},
 		Routes: []connectip.IPRoute{
 			{StartIP: netip.MustParseAddr("0.0.0.0"), EndIP: netip.MustParseAddr("255.255.255.255")},
 			{StartIP: netip.MustParseAddr("::"), EndIP: netip.MustParseAddr("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff")},
@@ -138,27 +140,34 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	// Chain + роутинг: два выхода — direct и цепочка через upstream-узел. Пул
-	// делится на подсети (по одной на выход); клиент шлёт с src нужной подсети
-	// (UDP) или ставит метку Qd-Route (TCP). A предъявляет B node-токен и ходит
-	// CONNECT-стримами — так же, как клиент ходит к A.
-	if *upstreamAddr != "" {
-		upClient, err := dialUpstream(ctx, *upstreamAddr, *upstreamAuthority, *upstreamToken)
-		if err != nil {
-			log.Fatalf("upstream: %v", err)
-		}
-		defer upClient.Close()
+	// Выходы узла (arch: роутинг/цепочки). direct + chain-выходы из БД; admin
+	// перенастраивает через API. Пул делится на подсети (по одной на выход); клиент
+	// шлёт с src нужной подсети (UDP) или ставит метку Qd-Route (TCP).
+	if store != nil {
+		obs := server.NewOutbounds(cfg.Pool, netstack.NetDialer{}, chainDialer(ctx))
+		defer obs.Close()
 
-		subs := server.SplitPool(cfg.Pool, 2)
-		if subs == nil {
-			log.Fatalf("пул %s мал для роутинга", cfg.Pool)
+		// Разовый выход из флага -upstream — сеем в БД как chain "chain" (обратная
+		// совместимость + удобно поднять стенд одной командой).
+		if *upstreamAddr != "" {
+			auth := *upstreamAuthority
+			if auth == "" {
+				h, _, _ := net.SplitHostPort(*upstreamAddr)
+				auth = h
+			}
+			if err := store.PutOutbound(ctx, db.OutboundRow{
+				Label: "chain", Type: db.OutChain, Addr: *upstreamAddr,
+				Authority: auth, Token: *upstreamToken, Enabled: true,
+			}); err != nil {
+				log.Printf("seed outbound: %v", err)
+			}
 		}
-		cfg.Outbounds = []server.Outbound{
-			{Label: "direct", Subnet: subs[0], Dialer: netstack.NetDialer{}},
-			{Label: "chain", Subnet: subs[1], Dialer: chain.New(upClient.H3Conn())},
+		if err := obs.Reload(ctx, store); err != nil {
+			log.Fatalf("выходы: %v", err)
 		}
-		cfg.Pool = subs[0] // аллокатор выдаёт хост-номера в базовой (direct) подсети
-		log.Printf("выходы: direct %s, chain→%s %s", subs[0], *upstreamAddr, subs[1])
+		cfg.Outbounds = obs
+		cfg.OutboundStore = store
+		log.Printf("выходы: %v", obs.Labels())
 	}
 
 	log.Printf("узел на %s (authority=%s, назначаю клиенту %s)", *listen, *authority, *assign)
@@ -168,17 +177,24 @@ func main() {
 	log.Print("остановлен")
 }
 
-// dialUpstream поднимает клиентское соединение к upstream-узлу (chain).
-func dialUpstream(ctx context.Context, addr, authority, token string) (*cip.Client, error) {
-	if authority == "" {
-		host, _, _ := net.SplitHostPort(addr)
-		authority = host
+// chainDialer — фабрика chain-выходов для менеджера outbounds. Живёт в main, а не
+// в server: cip импортирует server (Template), прямой импорт дал бы цикл.
+func chainDialer(base context.Context) server.ChainDialer {
+	return func(_ context.Context, addr, authority, token string) (netstack.Dialer, io.Closer, error) {
+		if authority == "" {
+			h, _, _ := net.SplitHostPort(addr)
+			authority = h
+		}
+		tmpl := server.Template(authority, "/connect-ip")
+		sni, _, _ := net.SplitHostPort(addr)
+		tlsConf := &tls.Config{InsecureSkipVerify: true, ServerName: sni}
+		// base-контекст (жизнь узла), а не dctx запроса: цепочка живёт долго.
+		client, _, err := cip.DialAuth(base, addr, tmpl, tlsConf, token, "https://"+authority+"/qd-auth")
+		if err != nil {
+			return nil, nil, err
+		}
+		return chain.New(client.H3Conn()), client, nil
 	}
-	tmpl := server.Template(authority, "/connect-ip")
-	sni, _, _ := net.SplitHostPort(addr)
-	tlsConf := &tls.Config{InsecureSkipVerify: true, ServerName: sni}
-	client, _, err := cip.DialAuth(ctx, addr, tmpl, tlsConf, token, "https://"+authority+"/qd-auth")
-	return client, err
 }
 
 // storeOrNil отдаёт nil-интерфейс, если БД нет: server.Config.Store — интерфейс,

@@ -23,48 +23,6 @@ type Outbound struct {
 	Dialer netstack.Dialer
 }
 
-// srcRouter выбирает выход по подсети src-адреса. Порядок outbounds важен:
-// первая покрывающая подсеть выигрывает.
-type srcRouter struct {
-	outbounds []Outbound
-	fallback  netstack.Dialer // src вне известных подсетей → direct (первый выход)
-}
-
-func (r *srcRouter) For(src netip.Addr) netstack.Dialer {
-	for i := range r.outbounds {
-		if r.outbounds[i].Subnet.Contains(src) {
-			return r.outbounds[i].Dialer
-		}
-	}
-	return r.fallback
-}
-
-// newRouter строит роутер по списку выходов. fallback — выход по умолчанию
-// (обычно direct, outbounds[0]).
-func newRouter(outbounds []Outbound) netstack.Router {
-	var fb netstack.Dialer
-	if len(outbounds) > 0 {
-		fb = outbounds[0].Dialer
-	}
-	return &srcRouter{outbounds: outbounds, fallback: fb}
-}
-
-// outboundDialer выбирает выход по метке (для TCP-CONNECT). Пустая/неизвестная
-// метка → выход по умолчанию (direct, outbounds[0]); без outbounds — cfg.Dialer.
-func (cfg Config) outboundDialer(label string) netstack.Dialer {
-	if len(cfg.Outbounds) == 0 {
-		return cfg.Dialer
-	}
-	if label != "" {
-		for i := range cfg.Outbounds {
-			if cfg.Outbounds[i].Label == label {
-				return cfg.Outbounds[i].Dialer
-			}
-		}
-	}
-	return cfg.Outbounds[0].Dialer
-}
-
 // SplitPool делит пул на n равных подсетей (n — степень двойки): по одной на
 // выход. Первая — базовая (direct), в ней аллокатор выдаёт хост-номера.
 func SplitPool(pool netip.Prefix, n int) []netip.Prefix {

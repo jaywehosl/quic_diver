@@ -53,17 +53,17 @@ func TestHopsExhaustedOrGarbage(t *testing.T) {
 // На исчерпанном лимите Dialer не открывает стрим — иначе петля A→B→A крутилась
 // бы, пока не кончатся стримы.
 func TestDialTCPRefusesAtZeroHops(t *testing.T) {
-	d := New(nil) // cc не нужен: до него не дойдёт
+	d := New(nil, nil, netip.Addr{}) // cc не нужен: до него не дойдёт
 	ctx := WithHops(context.Background(), 0)
 	if _, err := d.DialTCP(ctx, mustAddrPort()); err == nil {
 		t.Fatal("dial при нулевом hop-limit прошёл — защита от петли не работает")
 	}
 }
 
-// UDP через цепочку пока не поддержан — но обязан ОТКАЗАТЬ, а не выйти мимо
-// цепочки: иначе UDP-выход выдал бы адрес транзитного узла.
-func TestDialUDPRefused(t *testing.T) {
-	d := New(nil)
+// Без пакетного туннеля UDP обязан ОТКАЗАТЬ, а не выйти мимо цепочки: иначе
+// UDP-выход выдал бы адрес транзитного узла вместо адреса цепочки.
+func TestDialUDPRefusedWithoutTunnel(t *testing.T) {
+	d := New(nil, nil, netip.Addr{})
 	if _, err := d.DialUDP(context.Background(), mustAddrPort()); err != ErrUDPUnsupported {
 		t.Fatalf("DialUDP вернул %v, ожидался ErrUDPUnsupported", err)
 	}

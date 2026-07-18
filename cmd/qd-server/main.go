@@ -194,7 +194,24 @@ func chainDialer(base context.Context) server.ChainDialer {
 		if err != nil {
 			return nil, nil, err
 		}
-		return chain.New(client.H3Conn()), client, nil
+		// Адрес, назначенный upstream-узлом: с него уйдут UDP-пакеты цепочки.
+		// Не смогли узнать — цепочка работает TCP-only (UDP отклонится явно, а не
+		// утечёт наружу с адресом этого узла).
+		var local netip.Addr
+		pctx, cancel := context.WithTimeout(base, 10*time.Second)
+		prefs, perr := client.LocalPrefixes(pctx)
+		cancel()
+		if perr != nil {
+			log.Printf("цепочка %s: адрес не получен, UDP через неё не пойдёт: %v", addr, perr)
+		} else {
+			for _, p := range prefs {
+				if p.Addr().Is4() {
+					local = p.Addr()
+					break
+				}
+			}
+		}
+		return chain.New(client.H3Conn(), client, local), client, nil
 	}
 }
 

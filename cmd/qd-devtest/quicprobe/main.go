@@ -51,18 +51,39 @@ func short(s string, n int) string {
 	return s
 }
 
+// Флаги -q / -t ограничивают пробу одним протоколом: мёртвая проба стоит
+// таймаут, а при наборе статистики лишний протокол удваивает время прогона.
 func main() {
-	for _, ip := range os.Args[1:] {
-		tok, tt, terr := tcpTLS(ip)
-		qok, qt, qerr := quicHS(ip)
-		ts, qs := "МЁРТВ", "МЁРТВ"
-		if tok {
-			ts = "ЖИВ"
+	args := os.Args[1:]
+	onlyQUIC, onlyTCP := false, false
+	for len(args) > 0 && (args[0] == "-q" || args[0] == "-t") {
+		if args[0] == "-q" {
+			onlyQUIC = true
+		} else {
+			onlyTCP = true
 		}
-		if qok {
-			qs = "ЖИВ"
-		}
-		fmt.Printf("%-16s TCP-TLS=%-5s %4dms | QUIC-h3=%-5s %4dms | t:%s q:%s\n",
-			ip, ts, tt.Milliseconds(), qs, qt.Milliseconds(), short(terr, 22), short(qerr, 30))
+		args = args[1:]
 	}
+	for _, ip := range args {
+		switch {
+		case onlyQUIC:
+			qok, qt, qerr := quicHS(ip)
+			fmt.Printf("%-16s QUIC-h3=%-5s %4dms %s\n", ip, alive(qok), qt.Milliseconds(), short(qerr, 30))
+		case onlyTCP:
+			tok, tt, terr := tcpTLS(ip)
+			fmt.Printf("%-16s TCP-TLS=%-5s %4dms %s\n", ip, alive(tok), tt.Milliseconds(), short(terr, 30))
+		default:
+			tok, tt, terr := tcpTLS(ip)
+			qok, qt, qerr := quicHS(ip)
+			fmt.Printf("%-16s TCP-TLS=%-5s %4dms | QUIC-h3=%-5s %4dms | t:%s q:%s\n",
+				ip, alive(tok), tt.Milliseconds(), alive(qok), qt.Milliseconds(), short(terr, 22), short(qerr, 30))
+		}
+	}
+}
+
+func alive(ok bool) string {
+	if ok {
+		return "ЖИВ"
+	}
+	return "МЁРТВ"
 }

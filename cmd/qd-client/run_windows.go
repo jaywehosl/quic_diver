@@ -16,6 +16,7 @@ import (
 	"quicdiver/internal/client/connectdial"
 	"quicdiver/internal/client/dnsforward"
 	"quicdiver/internal/client/dnsproxy"
+	"quicdiver/internal/client/fakeip"
 	"quicdiver/internal/client/nat"
 	"quicdiver/internal/client/nat46"
 	"quicdiver/internal/client/netwatch"
@@ -141,20 +142,38 @@ func run(ctx context.Context, o options) error {
 	log.Printf("узел назначил адреса: %v", assigned)
 	rewriter := nat.New([]netip.Addr{realIP}, assigned)
 
-	// 6.5. NAT46 — только если своего IPv6 у машины нет. Тогда ОС не породит пакет
-	//      к v6-only хосту (ntc.party и подобные выглядят «несуществующими»), и мы
-	//      выдаём им фиктивный v4, подменяя его обратно при дозвоне. С настоящим v6
-	//      приложение само пойдёт по AAAA — синтез только мешал бы.
-	v6, err := setupNAT46(o.nat46)
-	if err != nil {
-		return err
+	// 6.5. fake-IP / NAT46 — как резолвер подменяет ответы.
+	//      С -rules: fake для ВСЕХ доменов (доменный роутинг — клиент точно знает
+	//      имя по dst; fakeip поглощает и v6-only случай). Без правил: nat46 только
+	//      для v6-only хостов (ntc.party и подобные, «несуществующие» на v4-клиенте).
+	var fakePool *fakeip.Pool
+	var nat46Table *nat46.Table
+	var dnsDecorate func(dnsproxy.Exchanger) dnsproxy.Exchanger
+	var router *routing.Router
+	if o.rules != "" {
+		parsed, err := routing.ParseRules(o.rules)
+		if err != nil {
+			return fmt.Errorf("правила: %w", err)
+		}
+		router = routing.NewRouter(routing.Compile(parsed, o.routeDef))
+		fakePool = fakeip.New(fakeip.DefaultPool, fakeip.DefaultTTL)
+		dnsDecorate = func(ex dnsproxy.Exchanger) dnsproxy.Exchanger { return fakeip.NewResolver(ex, fakePool) }
+		log.Printf("роутинг: %d правил (по умолчанию %q), fake-IP из %s", len(parsed), o.routeDef, fakePool.Prefix())
+	} else {
+		nat46Table, err = setupNAT46(o.nat46)
+		if err != nil {
+			return err
+		}
+		if nat46Table != nil {
+			dnsDecorate = func(ex dnsproxy.Exchanger) dnsproxy.Exchanger { return nat46.NewResolver(ex, nat46Table) }
+		}
 	}
 
 	// 6.6. DNS: локальный listener + подмена системного резолвера. Без этого
 	//      приложения спрашивают роутер (он в bypass как локальный), запрос уходит
 	//      мимо туннеля и провайдер отдаёт свою заглушку вместо реального адреса.
 	if !o.noDNS {
-		stopDNS, err := startDNS(ctx, client.H3Conn(), o.authority, v6)
+		stopDNS, err := startDNS(ctx, client.H3Conn(), o.authority, dnsDecorate)
 		if err != nil {
 			return fmt.Errorf("dns: %w", err)
 		}
@@ -197,21 +216,14 @@ func run(ctx context.Context, o options) error {
 		// поэтому они не должны превышать MTU интерфейса: при PPPoE это обычно
 		// 1480 и меньше, а пакет крупнее ОС просто отбросит. Дефолт 1400 — с
 		// запасом под PPPoE/VPN; -mtu задаёт явно.
+		// Выход TCP-флоу: с правилами — routeclient метит по домену (fake-IP) и
+		// подменяет fake→real; с nat46 — подмена v4→v6; иначе прямой CONNECT.
 		var dialer netstack.Dialer = connectdial.Dialer{CC: client.H3Conn()}
-		if v6 != nil {
-			dialer = nat46.Dialer{Inner: connectdial.Dialer{CC: client.H3Conn()}, Table: v6}
-		}
-		// Правила роутинга: TCP-флоу метится выходом (Qd-Route), узел следует
-		// метке. Пока по dst (CIDR/порт/домен); процесс и src-подсеть для UDP —
-		// следующие шаги. nat46-композиция при -rules отложена (взаимоисключимы).
-		if o.rules != "" {
-			parsed, err := routing.ParseRules(o.rules)
-			if err != nil {
-				return fmt.Errorf("правила: %w", err)
-			}
-			router := routing.NewRouter(routing.Compile(parsed, o.routeDef))
-			dialer = routeclient.Dialer{CC: client.H3Conn(), Router: router, Default: o.routeDef}
-			log.Printf("роутинг: %d правил, по умолчанию %q", len(parsed), o.routeDef)
+		switch {
+		case router != nil:
+			dialer = routeclient.Dialer{CC: client.H3Conn(), Router: router, Fake: fakePool, Default: o.routeDef}
+		case nat46Table != nil:
+			dialer = nat46.Dialer{Inner: connectdial.Dialer{CC: client.H3Conn()}, Table: nat46Table}
 		}
 		ns, err := netstack.NewWithMTU(dialer, o.mtu)
 		if err != nil {
@@ -304,10 +316,10 @@ func setupNAT46(mode string) (*nat46.Table, error) {
 //
 // Порядок важен: сначала listener, потом подмена — иначе между подменой и
 // готовностью listener'а система осталась бы вообще без резолвера.
-func startDNS(ctx context.Context, cc *http3.ClientConn, authority string, v6 *nat46.Table) (func(), error) {
+func startDNS(ctx context.Context, cc *http3.ClientConn, authority string, decorate func(dnsproxy.Exchanger) dnsproxy.Exchanger) (func(), error) {
 	var ex dnsproxy.Exchanger = dnsforward.New(cc, "https://"+authority+"/dns-query")
-	if v6 != nil {
-		ex = nat46.NewResolver(ex, v6)
+	if decorate != nil {
+		ex = decorate(ex)
 	}
 	p, err := dnsproxy.New(dnsproxy.Config{
 		Addrs:    []string{net.JoinHostPort(sysdns.Loopback4, "53"), net.JoinHostPort(sysdns.Loopback6, "53")},

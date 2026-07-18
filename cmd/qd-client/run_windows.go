@@ -5,9 +5,11 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"net/netip"
 	"strings"
 
@@ -21,6 +23,7 @@ import (
 	"quicdiver/internal/client/nat46"
 	"quicdiver/internal/client/netwatch"
 	"quicdiver/internal/client/routeclient"
+	"quicdiver/internal/client/routenat"
 	"quicdiver/internal/client/routing"
 	"quicdiver/internal/client/supervisor"
 	"quicdiver/internal/client/sysdns"
@@ -140,7 +143,7 @@ func run(ctx context.Context, o options) error {
 		assigned = append(assigned, p.Addr())
 	}
 	log.Printf("узел назначил адреса: %v", assigned)
-	rewriter := nat.New([]netip.Addr{realIP}, assigned)
+	var rewriter engine.Rewriter = nat.New([]netip.Addr{realIP}, assigned)
 
 	// 6.5. fake-IP / NAT46 — как резолвер подменяет ответы.
 	//      С -rules: fake для ВСЕХ доменов (доменный роутинг — клиент точно знает
@@ -159,6 +162,20 @@ func run(ctx context.Context, o options) error {
 		fakePool = fakeip.New(fakeip.DefaultPool, fakeip.DefaultTTL)
 		dnsDecorate = func(ex dnsproxy.Exchanger) dnsproxy.Exchanger { return fakeip.NewResolver(ex, fakePool) }
 		log.Printf("роутинг: %d правил (по умолчанию %q), fake-IP из %s", len(parsed), o.routeDef, fakePool.Prefix())
+
+		// UDP-роутинг: запросить выходы узла, сопоставить назначенные адреса
+		// подсетям, собрать routing-aware NAT (метка в src-адресе + fake→real).
+		obs, err := fetchOutbounds(ctx, client.H3Conn(), o.authority)
+		if err != nil {
+			log.Printf("выходы узла (UDP-роутинг отключён): %v", err)
+		} else {
+			assignedMap, subnets := mapAssigned(prefs, obs)
+			rewriter = routenat.New(routenat.Config{
+				RealApp: realIP, Assigned: assignedMap, Subnets: subnets,
+				Default: o.routeDef, Fake: fakePool, Router: router,
+			})
+			log.Printf("UDP-роутинг: %d выход(ов), адреса %v", len(assignedMap), assignedMap)
+		}
 	} else {
 		nat46Table, err = setupNAT46(o.nat46)
 		if err != nil {
@@ -353,6 +370,51 @@ func startDNS(ctx context.Context, cc *http3.ClientConn, authority string, decor
 			log.Printf("DNS: запросов %d, неудач %d", q, f)
 		}
 	}, nil
+}
+
+// fetchOutbounds запрашивает у узла публичный список выходов (метка+подсеть).
+// Сессия уже авторизована на QUIC-уровне (токен предъявлен до connect-ip),
+// поэтому доп-заголовок не нужен.
+func fetchOutbounds(ctx context.Context, cc *http3.ClientConn, authority string) ([]server.PublicOutbound, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+authority+"/qd-outbounds", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := cc.RoundTrip(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("статус %d", resp.StatusCode)
+	}
+	var obs []server.PublicOutbound
+	if err := json.NewDecoder(resp.Body).Decode(&obs); err != nil {
+		return nil, err
+	}
+	return obs, nil
+}
+
+// mapAssigned сопоставляет назначенные узлом адреса подсетям выходов: для каждого
+// выхода находит тот назначенный адрес, что лежит в его подсети. Так метка выхода
+// получает конкретный src-адрес клиента (по нему узел роутит UDP).
+func mapAssigned(prefs []netip.Prefix, obs []server.PublicOutbound) (map[string]netip.Addr, []netip.Prefix) {
+	assigned := make(map[string]netip.Addr, len(obs))
+	subnets := make([]netip.Prefix, 0, len(obs))
+	for _, o := range obs {
+		sub, err := netip.ParsePrefix(o.Subnet)
+		if err != nil {
+			continue
+		}
+		subnets = append(subnets, sub)
+		for _, p := range prefs {
+			if sub.Contains(p.Addr()) {
+				assigned[o.Label] = p.Addr()
+				break
+			}
+		}
+	}
+	return assigned, subnets
 }
 
 // primaryIP выбирает исходящий LAN-адрес по маршруту по умолчанию (сокет не шлёт

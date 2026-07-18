@@ -43,6 +43,10 @@ type Pool struct {
 	next     uint32
 	byFake   map[netip.Addr]entry
 	byDomain map[string]netip.Addr
+	// byReal — реальный адрес → fake. Нужен для обратного UDP-пути: приложение
+	// шлёт на fake и ждёт ответ ОТ fake, а узел отвечает с реального адреса хоста —
+	// его надо переписать обратно в fake, иначе приложение отбросит чужой src.
+	byReal map[netip.Addr]netip.Addr
 }
 
 // New создаёт пул. prefix обязан быть IPv4.
@@ -60,6 +64,7 @@ func New(prefix netip.Prefix, ttl time.Duration) *Pool {
 		lo: lo, hi: hi, next: lo,
 		byFake:   make(map[netip.Addr]entry),
 		byDomain: make(map[string]netip.Addr),
+		byReal:   make(map[netip.Addr]netip.Addr),
 	}
 }
 
@@ -80,8 +85,14 @@ func (p *Pool) Assign(domain string, real []netip.Addr) (netip.Addr, bool) {
 
 	if fake, ok := p.byDomain[domain]; ok {
 		if e, ok := p.byFake[fake]; ok {
+			for _, ra := range e.real { // старые real → отвязать
+				delete(p.byReal, ra)
+			}
 			e.real, e.expires = real, now.Add(p.ttl)
 			p.byFake[fake] = e
+			for _, ra := range real {
+				p.byReal[ra] = fake
+			}
 			return fake, true
 		}
 	}
@@ -91,7 +102,18 @@ func (p *Pool) Assign(domain string, real []netip.Addr) (netip.Addr, bool) {
 	}
 	p.byFake[fake] = entry{domain: domain, real: real, expires: now.Add(p.ttl)}
 	p.byDomain[domain] = fake
+	for _, ra := range real {
+		p.byReal[ra] = fake
+	}
 	return fake, true
+}
+
+// FakeOf — fake по реальному адресу (для обратного UDP-пути: src узла → fake).
+func (p *Pool) FakeOf(real netip.Addr) (netip.Addr, bool) {
+	p.mu.RLock()
+	fake, ok := p.byReal[real]
+	p.mu.RUnlock()
+	return fake, ok
 }
 
 // Domain возвращает домен по фиктивному адресу (для классификации).
@@ -159,6 +181,9 @@ func (p *Pool) alloc(now time.Time) (netip.Addr, bool) {
 		if now.After(e.expires) {
 			delete(p.byFake, cand)
 			delete(p.byDomain, e.domain)
+			for _, ra := range e.real {
+				delete(p.byReal, ra)
+			}
 			return cand, true
 		}
 	}

@@ -5,6 +5,7 @@
 // обычно один primary адрес на семейство, поэтому NAT — простая 1:1 подмена:
 //   - outbound: src real → assigned;
 //   - inbound:  dst assigned → real.
+//
 // Порты не трогаются (не PAT). Контрольные суммы правятся инкрементально
 // (RFC 1624): IPv4-заголовок пересчитывается, L4 (TCP/UDP/ICMPv6) — по дельте
 // адреса в псевдо-заголовке.
@@ -109,6 +110,32 @@ func (n *NAT) applyV6(pkt []byte, outbound bool) {
 	}
 	copy(field, to[:])
 	fixL4(pkt, 6, from[:], to[:])
+}
+
+// RewriteV4 переписывает src и/или dst IPv4-пакета на месте (невалидный Addr —
+// не трогать) и чинит контрольные суммы (IPv4-заголовок + L4). Для routing-NAT,
+// где выходов несколько и dst подменяется fake→real — простой 1:1 NAT тут мал.
+func RewriteV4(pkt []byte, newSrc, newDst netip.Addr) {
+	if len(pkt) < 20 || pkt[0]>>4 != 4 {
+		return
+	}
+	if newSrc.Is4() {
+		old := [4]byte(pkt[12:16])
+		nb := newSrc.As4()
+		if old != nb {
+			copy(pkt[12:16], nb[:])
+			fixL4(pkt, 4, old[:], nb[:])
+		}
+	}
+	if newDst.Is4() {
+		old := [4]byte(pkt[16:20])
+		nb := newDst.As4()
+		if old != nb {
+			copy(pkt[16:20], nb[:])
+			fixL4(pkt, 4, old[:], nb[:])
+		}
+	}
+	fixIPv4Header(pkt)
 }
 
 // fixIPv4Header пересчитывает контрольную сумму IPv4-заголовка.

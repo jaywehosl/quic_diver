@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/netip"
+	"strings"
 
 	"github.com/quic-go/quic-go/http3"
 
@@ -75,6 +76,20 @@ func run(ctx context.Context, o options) error {
 	bypass := append([]netip.Prefix(nil), g.Bypasses()...)
 	for _, ip := range serverIPs {
 		bypass = append(bypass, netip.PrefixFrom(ip, ip.BitLen()))
+	}
+	// Доп-исключения из -bypass (отладка: не заворачивать свои соединения к другим
+	// узлам/сервисам, иначе теряется доступ к ним на время работы клиента).
+	for _, s := range strings.Split(o.bypass, ",") {
+		if s = strings.TrimSpace(s); s == "" {
+			continue
+		}
+		if p, err := netip.ParsePrefix(s); err == nil {
+			bypass = append(bypass, p)
+		} else if a, err := netip.ParseAddr(s); err == nil {
+			bypass = append(bypass, netip.PrefixFrom(a, a.BitLen()))
+		} else {
+			log.Printf("bypass: пропускаю %q: %v", s, err)
+		}
 	}
 	filter := windivert.BuildFilter(windivert.CaptureConfig{TCP: true, UDP: true, Bypass: bypass})
 	log.Printf("filter: %s", filter)

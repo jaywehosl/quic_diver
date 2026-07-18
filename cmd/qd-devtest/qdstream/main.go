@@ -25,8 +25,10 @@ import (
 func main() {
 	srv := flag.String("server", "localhost:8443", "endpoint узла")
 	sni := flag.String("sni", "localhost:8443", "TLS ServerName")
-	target := flag.String("target", "localhost:8080", "benchsrv (host:port) — куда CONNECT")
+	target := flag.String("target", "127.0.0.1:8080", "benchsrv (host:port) — куда CONNECT")
 	dur := flag.Duration("d", 15*time.Second, "длительность")
+	token := flag.String("token", "", "токен доступа (для узла с БД)")
+	route := flag.String("route", "", "метка выхода Qd-Route")
 	flag.Parse()
 
 	ctx := context.Background()
@@ -44,13 +46,28 @@ func main() {
 	defer tr.Close()
 	cc := tr.NewClientConn(qconn)
 
+	// Авторизация сессии (узел с БД). Без токена узел без БД примет и так.
+	if *token != "" {
+		areq, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+*sni+"/qd-auth", nil)
+		areq.Header.Set("X-Qd-Token", *token)
+		arsp, err := cc.RoundTrip(areq)
+		if err != nil || arsp.StatusCode != http.StatusNoContent {
+			log.Fatalf("auth: %v (статус %v)", err, arsp)
+		}
+		arsp.Body.Close()
+	}
+
 	// CONNECT-туннель до benchsrv через узел.
 	pr, pw := io.Pipe()
+	hdr := make(http.Header)
+	if *route != "" {
+		hdr.Set("Qd-Route", *route)
+	}
 	req := &http.Request{
 		Method: http.MethodConnect,
 		URL:    &url.URL{Scheme: "https", Host: *target},
 		Host:   *target,
-		Header: make(http.Header),
+		Header: hdr,
 		Body:   pr,
 	}
 	resp, err := cc.RoundTrip(req)

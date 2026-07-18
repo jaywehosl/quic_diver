@@ -31,6 +31,7 @@ type options struct {
 	recvWorkers int    // потоков захвата (1 — сохраняет порядок пакетов)
 	mtu         int    // MTU локального стека (≤ MTU интерфейса; PPPoE обычно 1480)
 	brutalMbps  int    // congestion: слать с этой полосой, игнорируя потери (0 — Cubic)
+	bypass      string // доп-префиксы в обход перехвата (через запятую) — для отладки
 }
 
 // Встроенные параметры для «боевой» сборки: задаются линковщиком
@@ -43,6 +44,7 @@ var (
 	builtinServer    string
 	builtinAuthority string
 	builtinToken     string
+	builtinBrutal    string // congestion Мбит/с для боевой сборки (upload)
 )
 
 func main() {
@@ -66,10 +68,17 @@ func main() {
 	flag.IntVar(&o.recvWorkers, "recv-workers", 1, "потоков захвата: 1 сохраняет порядок пакетов; >1 ускоряет скачивание ценой reordering")
 	flag.IntVar(&o.mtu, "mtu", 1500, "MTU локального стека; инжект идёт в интерфейс (у него обычно 1500), а не в PPPoE-путь")
 	flag.IntVar(&o.brutalMbps, "brutal", 0, "слать с полосой N Мбит/с, игнорируя потери (0 — обычный Cubic); ставить НИЖЕ реальной полосы отдачи")
+	flag.StringVar(&o.bypass, "bypass", "", "доп-префиксы в обход перехвата через запятую (напр. 1.2.3.4/32) — для отладки, чтобы не рвать свои соединения")
 	pprofAddr := flag.String("pprof", "", "адрес pprof (напр. localhost:6061); пусто → выкл")
 	flag.Parse()
 	if o.authority == "" {
 		o.authority = o.server
+	}
+	// Боевая сборка: brutal вшит (upload), если флагом не переопределён.
+	if o.brutalMbps == 0 && builtinBrutal != "" {
+		if v, err := strconv.Atoi(builtinBrutal); err == nil {
+			o.brutalMbps = v
+		}
 	}
 
 	if o.server != "" && o.token != "" {

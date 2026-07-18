@@ -38,8 +38,8 @@ const maxInboundBatch = 128
 
 // Engine — гибридный движок клиента.
 type Engine struct {
-	guard    *guard.Guard
-	rewriter engine.Rewriter // NAT только для датаграммного (UDP) пути
+	guard       *guard.Guard
+	rewriter    engine.Rewriter // NAT только для датаграммного (UDP) пути
 	ns          *netstack.Stack // локальный стек: терминация TCP → CONNECT-стрим
 	recvWorkers int             // потоков захвата (>1 ускоряет скачивание, но даёт reordering)
 	bufPool     sync.Pool       // буферы датаграммного пути
@@ -303,15 +303,6 @@ type tcpTunnel struct {
 }
 
 func (t *tcpTunnel) push(pkt []byte) {
-	// первые пакеты — байтами: только так видно, что именно стек бракует
-	if n := t.cPush.Load(); n < 3 {
-		m := 28
-		if len(pkt) < m {
-			m = len(pkt)
-		}
-		log.Printf("  [dbg] pkt#%d len=%d ver=%d ihl=%d proto=%d hex=% x",
-			n, len(pkt), pkt[0]>>4, (pkt[0]&0x0F)*4, pkt[9], pkt[:m])
-	}
 	buf := t.pool.Get().([]byte)
 	n := copy(buf, pkt)
 	select {

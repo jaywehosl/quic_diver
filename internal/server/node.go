@@ -263,11 +263,69 @@ func Run(ctx context.Context, cfg Config) error {
 			MaxConnectionReceiveWindow:     15 << 20,
 		},
 	}
+	// Витрина на TCP: тот же порт, тот же сертификат, та же страница. Без неё узел
+	// слушает только UDP — а домен, чей HTTPS не отвечает по TCP при живом QUIC,
+	// сам себя выдаёт при активном пробинге (см. decoy.Site).
+	tcpSrv, tcpErr := serveDecoyTCP(ctx, cfg, udpAddr.Port)
+
 	go func() {
 		<-ctx.Done()
 		srv.Close()
+		if tcpSrv != nil {
+			tcpSrv.Close()
+		}
 	}()
-	return srv.Serve(udp)
+
+	err = srv.Serve(udp)
+	// Ошибка витрины интересна, только если она уронила узел раньше QUIC.
+	select {
+	case terr := <-tcpErr:
+		if err == nil && terr != nil {
+			return terr
+		}
+	default:
+	}
+	return err
+}
+
+// serveDecoyTCP поднимает HTTPS-витрину (H1+H2) на TCP того же порта.
+//
+// Узел работает и без неё (возвращаем nil при ошибке — обычно порт занят), но
+// тогда остаётся маркер: QUIC на порту есть, TCP молчит. Поэтому неудачу
+// логируем громко, а не глотаем.
+func serveDecoyTCP(ctx context.Context, cfg Config, port int) (*http.Server, <-chan error) {
+	errc := make(chan error, 1)
+	if cfg.TLS == nil {
+		log.Print("витрина TCP: нет TLS-конфига, пропускаю (узел виден только по UDP)")
+		return nil, errc
+	}
+	ln, err := net.Listen("tcp", cfg.Listen)
+	if err != nil {
+		log.Printf("витрина TCP на %s не поднялась: %v (узел виден только по UDP — палево при пробинге)", cfg.Listen, err)
+		return nil, errc
+	}
+
+	// ALPN у витрины свой: h3 живёт на UDP, здесь — обычные H2/HTTP1.1.
+	// Сертификат тот же, поэтому TLS сходится и по IP с нашим SNI.
+	tlsConf := cfg.TLS.Clone()
+	tlsConf.NextProtos = []string{"h2", "http/1.1"}
+
+	srv := &http.Server{
+		Handler:           decoy.NewSite(port),
+		TLSConfig:         tlsConf,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		ErrorLog:          log.New(io.Discard, "", 0), // сканеры шумят битым TLS — не засорять журнал
+	}
+	go func() {
+		err := srv.ServeTLS(ln, "", "")
+		if err != nil && ctx.Err() == nil {
+			log.Printf("витрина TCP остановилась: %v", err)
+		}
+		errc <- err
+	}()
+	log.Printf("витрина на TCP %s (H1+H2, Alt-Svc h3=\":%d\")", cfg.Listen, port)
+	return srv, errc
 }
 
 // authorize проверяет предъявленный токен по БД и, если он живой, помечает

@@ -333,20 +333,6 @@ function renderNodes(box, list) {
 
 function gb(n) { return (Number(n || 0) / 1073741824).toFixed(2) + ' ГБ'; }
 
-function renderUsers(box, list) {
-  box.innerHTML = '<table class="grid"><tr><th>Клиент</th><th>Роль</th><th>Трафик по сети</th><th>Лимит</th><th></th></tr>' +
-    list.map((u) => {
-      const q = u.quota || {};
-      const used = gb((u.network_traffic?.bytes_in || 0) + (u.network_traffic?.bytes_out || 0));
-      return `<tr>
-        <td>${esc(u.label || '—')}<div class="hint mono">${esc(String(u.hash).slice(0, 16))}…</div></td>
-        <td>${esc(u.role)}${u.revoked ? ' <span style="color:var(--err)">отозван</span>' : ''}</td>
-        <td class="num">${used}</td>
-        <td class="num">${q.limit ? gb(q.limit) : '—'}</td>
-        <td>${q.limit && q.used >= q.limit ? '<span style="color:var(--err)">исчерпан</span>' : ''}</td>
-      </tr>`;
-    }).join('') + '</table>';
-}
 
 function renderCluster(box, c) {
   box.innerHTML = `<table class="grid">
@@ -494,3 +480,161 @@ async function applySetupLink() {
 
 $('setupApply').onclick = applySetupLink;
 $('setupLink').addEventListener('keydown', (e) => { if (e.key === 'Enter') applySetupLink(); });
+
+// --- управление клиентами ---
+
+// Ссылка выдаётся один раз: в базе только хеш токена, повторно её не собрать.
+// Поэтому после создания она не исчезает сама и не прячется за уведомлением —
+// висит, пока человек её не заберёт.
+let lastIssued = null;
+
+function renderUsers(box, list) {
+  box.innerHTML = `
+    <div class="row wrap">
+      <input id="newLabel" placeholder="имя клиента" style="max-width:200px">
+      <input id="newGB" placeholder="лимит, ГБ" class="narrow" inputmode="decimal">
+      <input id="newDays" placeholder="период, дн" class="narrow" inputmode="numeric">
+      <input id="newDevices" placeholder="устройств" class="narrow" inputmode="numeric">
+      <button id="btnNewUser" class="primary">Выдать доступ</button>
+      <span id="usersMsg" class="msg"></span>
+    </div>
+    <div id="issued"></div>
+    <table class="grid" id="usersTable">
+      <tr><th>Клиент</th><th>Роль</th><th>Расход</th><th>Лимит</th><th>Устройств</th><th></th></tr>
+      ${list.map(userRow).join('')}
+    </table>`;
+
+  if (lastIssued) showIssued(lastIssued);
+  $('btnNewUser').onclick = createUser;
+  box.querySelectorAll('[data-act]').forEach((b) => {
+    b.onclick = () => userAction(b.dataset.act, b.dataset.hash, b.dataset.label);
+  });
+}
+
+function userRow(u) {
+  const q = u.quota || {};
+  const net = u.network_traffic || {};
+  const used = gb((net.bytes_in || 0) + (net.bytes_out || 0));
+  const over = q.limit && q.used >= q.limit;
+  const devices = u.device_count ?? (u.devices || []).length;
+
+  return `<tr${u.revoked ? ' style="opacity:.55"' : ''}>
+    <td>${esc(u.label || '—')}<div class="hint mono">${esc(String(u.hash).slice(0, 16))}…</div></td>
+    <td>${esc(u.role)}${u.revoked ? ' <span style="color:var(--err)">отозван</span>' : ''}</td>
+    <td class="num">${used}${over ? ' <span style="color:var(--err)">исчерпан</span>' : ''}</td>
+    <td class="num">${q.limit ? gb(q.limit) : '—'}${q.period_days ? ` / ${q.period_days} дн` : ''}</td>
+    <td class="num">${devices || '—'}${u.limits?.devices ? ' / ' + u.limits.devices : ''}</td>
+    <td class="row" style="margin:0;gap:6px">
+      <button data-act="limit" data-hash="${esc(u.hash)}" data-label="${esc(u.label || '')}">Лимит</button>
+      <button data-act="reset" data-hash="${esc(u.hash)}">Сбросить</button>
+      ${u.revoked ? '' :
+        `<button data-act="revoke" data-hash="${esc(u.hash)}" data-label="${esc(u.label || '')}">Отозвать</button>`}
+    </td>
+  </tr>`;
+}
+
+async function createUser() {
+  const label = $('newLabel').value.trim();
+  if (!label) { say($('usersMsg'), 'нужно имя', 'err'); return; }
+
+  const body = { label };
+  const gbVal = parseFloat($('newGB').value);
+  if (gbVal > 0) body.limit_traffic_gb = gbVal;
+  const days = parseInt($('newDays').value, 10);
+  if (days > 0) body.traffic_period_days = days;
+  const dev = parseInt($('newDevices').value, 10);
+  if (dev > 0) body.limit_devices = dev;
+
+  $('btnNewUser').disabled = true;
+  try {
+    const res = await api('/api/node/qd-admin/users', { body, admin: adminToken });
+    // Лимиты задаются вторым запросом: создание их не принимает, а разносить
+    // это по двум действиям человека — лишний шаг, о котором он забудет.
+    if (body.limit_traffic_gb || body.traffic_period_days || body.limit_devices) {
+      await api('/api/node/qd-admin/users', {
+        method: 'PATCH', admin: adminToken,
+        body: {
+          hash: res.hash,
+          limit_traffic_gb: body.limit_traffic_gb,
+          traffic_period_days: body.traffic_period_days,
+          limit_devices: body.limit_devices,
+        },
+      });
+    }
+    lastIssued = { label, bundle: res.bundle, token: res.token };
+    $('newLabel').value = $('newGB').value = $('newDays').value = $('newDevices').value = '';
+    adminView('users');
+  } catch (e) {
+    say($('usersMsg'), e.message, 'err');
+  } finally {
+    $('btnNewUser').disabled = false;
+  }
+}
+
+function showIssued(x) {
+  $('issued').innerHTML = `
+    <div class="result">
+      <div><b>Доступ для «${esc(x.label)}» выдан.</b> Ссылка показывается один раз —
+        в базе хранится только отпечаток токена, собрать её заново нельзя.</div>
+      <textarea id="issuedLink" rows="3" readonly style="margin-top:8px">${esc(x.bundle || '')}</textarea>
+      <div class="row">
+        <button id="btnCopyLink" class="primary">Скопировать ссылку</button>
+        <button id="btnHideIssued">Убрать</button>
+        <span id="copyMsg" class="msg"></span>
+      </div>
+    </div>`;
+
+  $('btnCopyLink').onclick = async () => {
+    const text = $('issuedLink').value;
+    try {
+      await navigator.clipboard.writeText(text);
+      say($('copyMsg'), 'скопировано', 'ok');
+    } catch {
+      // Буфер обмена может быть недоступен — выделяем, чтобы скопировали руками.
+      $('issuedLink').select();
+      say($('copyMsg'), 'выделено — скопируйте вручную', '');
+    }
+  };
+  $('btnHideIssued').onclick = () => { lastIssued = null; $('issued').innerHTML = ''; };
+}
+
+async function userAction(act, hash, label) {
+  if (act === 'revoke') {
+    // Отзыв необратим: токен помечается надгробием и расходится по сети таким.
+    if (!confirm(`Отозвать доступ «${label || hash.slice(0, 12)}»?\n\nЭто необратимо: клиент отключится, и та же ссылка больше не заработает.`)) return;
+    try {
+      await api(`/api/node/qd-admin/users?hash=${encodeURIComponent(hash)}`,
+        { method: 'DELETE', body: {}, admin: adminToken });
+      adminView('users');
+    } catch (e) { alert('Не отозвалось: ' + e.message); }
+    return;
+  }
+
+  if (act === 'reset') {
+    try {
+      await api('/api/node/qd-admin/users', {
+        method: 'PATCH', admin: adminToken, body: { hash, reset_traffic: true },
+      });
+      adminView('users');
+    } catch (e) { alert('Не сбросилось: ' + e.message); }
+    return;
+  }
+
+  if (act === 'limit') {
+    const gbVal = prompt(`Лимит трафика для «${label || hash.slice(0, 12)}», ГБ.\n0 — снять ограничение.`);
+    if (gbVal === null) return;
+    const days = prompt('Период в днях (0 — без сброса, обычно 30):', '30');
+    if (days === null) return;
+    try {
+      await api('/api/node/qd-admin/users', {
+        method: 'PATCH', admin: adminToken,
+        body: {
+          hash,
+          limit_traffic_gb: parseFloat(gbVal) || 0,
+          traffic_period_days: parseInt(days, 10) || 0,
+        },
+      });
+      adminView('users');
+    } catch (e) { alert('Не сохранилось: ' + e.message); }
+  }
+}

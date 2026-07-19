@@ -64,9 +64,12 @@ type userView struct {
 	// ByNode — тот же расход в разрезе узлов: видно, где клиент ходит.
 	ByNode []db.NodeTraffic `json:"by_node,omitempty"`
 	// Quota — лимит трафика и расход за текущий период.
-	Quota    db.Quota     `json:"quota"`
-	Devices  []db.Device  `json:"devices,omitempty"`
-	Sessions []db.Session `json:"sessions,omitempty"`
+	Quota db.Quota `json:"quota"`
+	// DeviceCount — сколько устройств у клиента. В списке нужен только счёт:
+	// сами устройства едут в подробностях.
+	DeviceCount int          `json:"device_count,omitempty"`
+	Devices     []db.Device  `json:"devices,omitempty"`
+	Sessions    []db.Session `json:"sessions,omitempty"`
 }
 
 type userLimits struct {
@@ -94,7 +97,23 @@ func listUsers(w http.ResponseWriter, r *http.Request, store *db.SQLite) {
 	}
 	out := make([]userView, 0, len(rows))
 	for _, t := range rows {
-		out = append(out, tokenToView(t))
+		v := tokenToView(t)
+		// Расход и квота нужны прямо в списке: администратор смотрит именно на
+		// них, и заставлять открывать каждого клиента по отдельности ради двух
+		// чисел — worst-case на десяти клиентах и невыносимо на сотне.
+		//
+		// Устройства и сессии остаются в подробностях: их много, и в списке они
+		// ничего не добавляют.
+		if q, err := store.QuotaOf(ctx, t.Hash); err == nil {
+			v.Quota = q
+		}
+		if n, err := store.NetworkTrafficOf(ctx, t.Hash); err == nil {
+			v.Network = n
+		}
+		if devs, err := store.ListDevices(ctx, t.Hash); err == nil {
+			v.DeviceCount = len(devs)
+		}
+		out = append(out, v)
 	}
 	writeJSON(w, out)
 }

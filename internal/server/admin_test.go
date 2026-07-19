@@ -99,3 +99,50 @@ func TestAdminDNSBadUpstream(t *testing.T) {
 func bytesContains(b []byte, s string) bool {
 	return strings.Contains(string(b), s)
 }
+
+// Панель живёт на клиенте и проксирует админ-запросы через УЖЕ поднятую
+// клиентскую связь: роль сессии там навсегда «user». Без проверки заголовка
+// админ-API из панели был бы недоступен вовсе — на это и наткнулись вживую.
+func TestAdminTokenFromHeaderAllowed(t *testing.T) {
+	cfg, store := usersCfg(t)
+	adminToken, _ := auth.Generate()
+	store.PutToken(context.Background(), auth.Hash(adminToken), auth.RoleAdmin, "админ")
+
+	// Сессия — клиентская, как при проксировании через панель.
+	r := req(http.MethodGet, "/qd-admin/users", "", auth.RoleUser)
+	r.Header.Set(auth.HeaderToken, adminToken)
+
+	if !adminAllowed(r, cfg) {
+		t.Fatal("админ-токен в заголовке не признан — панель не сможет управлять сетью")
+	}
+}
+
+// Клиентский токен в заголовке админом не делает.
+func TestUserTokenInHeaderRejected(t *testing.T) {
+	cfg, store := usersCfg(t)
+	userToken, _ := auth.Generate()
+	store.PutToken(context.Background(), auth.Hash(userToken), auth.RoleUser, "клиент")
+
+	r := req(http.MethodGet, "/qd-admin/users", "", auth.RoleUser)
+	r.Header.Set(auth.HeaderToken, userToken)
+
+	if adminAllowed(r, cfg) {
+		t.Fatal("клиентский токен дал админский доступ")
+	}
+}
+
+// Отозванный админ доступа не имеет: Lookup отдаёт только живые токены.
+func TestRevokedAdminTokenRejected(t *testing.T) {
+	cfg, store := usersCfg(t)
+	ctx := context.Background()
+	adminToken, _ := auth.Generate()
+	store.PutToken(ctx, auth.Hash(adminToken), auth.RoleAdmin, "бывший админ")
+	store.Revoke(ctx, auth.Hash(adminToken))
+
+	r := req(http.MethodGet, "/qd-admin/users", "", auth.RoleUser)
+	r.Header.Set(auth.HeaderToken, adminToken)
+
+	if adminAllowed(r, cfg) {
+		t.Fatal("отозванный админ-токен принят")
+	}
+}

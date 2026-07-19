@@ -8,6 +8,7 @@ import (
 	"flag"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -46,16 +47,27 @@ func (s *fakeSvc) Status() service.Status {
 	return service.Status{State: s.st}
 }
 
-// fakeCtl отвечает за узел: выходы, реестр, клиенты, статистика.
-type fakeCtl struct{}
+// fakeCtl отвечает за узел. С -real запросы уходят на НАСТОЯЩИЙ узел через
+// управляющую связь: панель тогда работает с живыми данными.
+type fakeCtl struct{ real *control.Control }
 
-func (fakeCtl) Status() control.Status {
+func (c fakeCtl) Status() control.Status {
+	if c.real != nil {
+		return c.real.Status()
+	}
 	return control.Status{Online: true, Node: "node.example", SRTT: "12ms"}
 }
 
-func (fakeCtl) SetNode([]config.Entry, string) {}
+func (c fakeCtl) SetNode(e []config.Entry, t string) {
+	if c.real != nil {
+		c.real.SetNode(e, t)
+	}
+}
 
-func (fakeCtl) Do(ctx context.Context, r *http.Request) (*http.Response, error) {
+func (c fakeCtl) Do(ctx context.Context, r *http.Request) (*http.Response, error) {
+	if c.real != nil {
+		return c.real.Do(ctx, r)
+	}
 	body := "[]"
 	switch {
 	case strings.HasSuffix(r.URL.Path, "/qd-exits"):
@@ -118,8 +130,21 @@ func main() {
 	// Ненастроенный клиент — чтобы увидеть экран первого запуска. Ссылку ниже
 	// можно вставить в него и проверить переход в основной интерфейс.
 	if os.Getenv("QD_CONFIGURED") != "" {
-		cfg.Node.Entries = []config.Entry{{Addr: "203.0.113.10:443", SNI: "node.example"}}
-		cfg.Node.Token = "qd_демонстрационный"
+		addr, sni := "203.0.113.10:443", "node.example"
+		token := "qd_демонстрационный"
+		// Живой узел задаётся окружением: тогда панель работает с настоящими
+		// данными, а не с подделкой.
+		if v := os.Getenv("QD_NODE"); v != "" {
+			addr = v
+			if h, _, err := net.SplitHostPort(v); err == nil {
+				sni = h
+			}
+		}
+		if v := os.Getenv("QD_TOKEN"); v != "" {
+			token = v
+		}
+		cfg.Node.Entries = []config.Entry{{Addr: addr, SNI: sni}}
+		cfg.Node.Token = token
 	}
 	cfg.Routing.Rules = []string{
 		"# банк мимо туннеля",
@@ -135,8 +160,15 @@ func main() {
 	notices.Post(notify.Error, "нет связи с узлом", "ru.example не отвечает")
 
 	tok := api.Token("demo-panel-key")
+	var ctl api.Controller = fakeCtl{}
+	if os.Getenv("QD_REAL") != "" {
+		c := control.New(control.DialNode(true))
+		c.SetNode(cfg.Node.Entries, cfg.Node.Token)
+		ctl = fakeCtl{real: c}
+		log.Print("режим живого узла: запросы уходят на настоящий сервер")
+	}
 	h := api.Handler(tok, api.Deps{
-		Service: &fakeSvc{}, Control: fakeCtl{},
+		Service: &fakeSvc{}, Control: ctl,
 		Config: &memCfg{cfg: cfg}, Notices: notices,
 		Quit: func() { log.Print("нажали «Выйти»") },
 	}, panel.Handler())

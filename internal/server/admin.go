@@ -39,12 +39,30 @@ func adminAllowed(r *http.Request, cfg Config) bool {
 	if cfg.Store == nil {
 		return false // без БД админить нечем и некого — эндпоинт закрыт
 	}
-	sess := auth.SessionFrom(r.Context())
-	if sess == nil {
-		return false
+	// Сессия, авторизованная админским токеном (qdadmin и прочие инструменты,
+	// которые ходят к узлу напрямую).
+	if sess := auth.SessionFrom(r.Context()); sess != nil {
+		if role, _, ok := sess.Status(); ok && role == auth.RoleAdmin {
+			return true
+		}
 	}
-	role, _, ok := sess.Status()
-	return ok && role == auth.RoleAdmin
+	// Либо админский токен в заголовке запроса.
+	//
+	// Так ходит панель: она живёт на клиенте (так в ТЗ) и проксирует запросы
+	// через УЖЕ поднятую клиентскую связь, где сессия авторизована клиентским
+	// токеном. Роль сессии там навсегда «user», и без этой проверки админ-API
+	// из панели недоступен вовсе — сколько заголовков ни предъявляй.
+	//
+	// Токен едет внутри QUIC/TLS, снаружи невидим — тем же путём, что и
+	// клиентский при авторизации сессии.
+	if tok := auth.TokenFromRequest(r); tok != "" {
+		if store, ok := sqliteOf(cfg.Store); ok {
+			if info, err := store.Lookup(r.Context(), auth.Hash(tok)); err == nil {
+				return info.Role == auth.RoleAdmin
+			}
+		}
+	}
+	return false
 }
 
 // dnsPatch — тело POST: заданные поля применяются, пустые игнорируются.

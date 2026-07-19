@@ -10,7 +10,6 @@ import (
 // Локальные данные узла — то, что снимок мастера не содержит и содержать не
 // может: узел наблюдает их сам.
 //
-//   - outbounds — свои выходы, там открытый node-токен (секрет узла);
 //   - devices   — кто и с какой машины подключался ИМЕННО СЮДА;
 //   - sessions  — живые подключения этого узла;
 //   - traffic   — счётчик, который обязан пережить и обрыв, и подмену базы.
@@ -47,11 +46,6 @@ func carryLocal(ctx context.Context, dst, src string) error {
 }
 
 var carryQueries = []string{
-	// Выходы узла локальны целиком — переносим как есть.
-	`INSERT OR REPLACE INTO outbounds
-	   (id, label, type, addr, authority, token, enabled, updated_at)
-	 SELECT id, label, type, addr, authority, token, enabled, updated_at FROM prev.outbounds`,
-
 	// Устройства: наблюдение — наше, а вот revoked ставит администратор на
 	// мастере. Поэтому чужие строки не трогаем, а свои добавляем.
 	`INSERT OR IGNORE INTO devices

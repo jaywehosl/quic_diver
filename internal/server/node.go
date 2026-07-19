@@ -53,18 +53,11 @@ type Config struct {
 	Pool netip.Prefix
 	// Routes — рекламируемые клиенту маршруты (обычно весь IPv4/IPv6).
 	Routes []connectip.IPRoute
-	// Dialer — выход по умолчанию (dev/один выход): direct или chain. Используется,
-	// когда Outbounds == nil.
+	// Dialer — выход наружу с этого узла.
 	Dialer netstack.Dialer
 	// Links — связи с соседними узлами из реестра. Заменяет ручные аутбаунды:
 	// узел берёт соседа из общей реплики и представляется своим токеном.
 	Links *NodeLinks
-	// Outbounds — живой набор выходов с роутингом (из БД, перенастраивается admin).
-	// nil → один Dialer без роутинга.
-	Outbounds *Outbounds
-	// OutboundStore — БД для admin-API выходов (Reload после изменения). Обычно =
-	// Store.
-	OutboundStore db.Store
 	// Resolver — DNS узла (кеш + upstream). nil → эндпоинт /dns-query не поднимается.
 	// Резолв обязан идти здесь: у клиента провайдер подменяет ответы на заглушку.
 	Resolver *dns.Resolver
@@ -81,8 +74,6 @@ type Config struct {
 	// AdminPath — путь admin-API (управление резолвером), обычно "/qd-admin/dns".
 	// Пусто → не поднимается. Доступ строго по admin-токену.
 	AdminPath string
-	// AdminOutboundsPath — путь admin-API выходов, обычно "/qd-admin/outbounds".
-	AdminOutboundsPath string
 	// AdminUsersPath — путь admin-API учёта клиентов, обычно "/qd-admin/users".
 	AdminUsersPath string
 	// AdminSessionsPath — путь admin-API живых сессий, обычно "/qd-admin/sessions".
@@ -103,9 +94,9 @@ type Config struct {
 	ReplicaPath string
 	// HeartbeatPath — путь отметок живости соседей, обычно "/qd-beat".
 	HeartbeatPath string
-	// OutboundsPath — путь публикации выходов клиенту (метка+подсеть),
-	// обычно "/qd-outbounds". Доступ авторизованному клиенту, секреты не отдаются.
-	OutboundsPath string
+	// ExitsPath — путь публикации выходов клиенту (метки для правил),
+	// обычно "/qd-exits". Доступ авторизованному клиенту, секретов там нет.
+	ExitsPath string
 }
 
 // Template строит URI Template connect-ip эндпоинта. Клиент и узел обязаны
@@ -137,14 +128,10 @@ func Run(ctx context.Context, cfg Config) error {
 	tmpl := Template(cfg.Authority, cfg.ConnectIPPath)
 	proxy := &connectip.Proxy{}
 
-	// Роутер выхода: живой набор outbound'ов (выбор по src) либо один Dialer.
-	var router netstack.Router
-	if cfg.Outbounds != nil {
-		router = cfg.Outbounds
-		log.Printf("роутинг по src: выходы %v", cfg.Outbounds.Labels())
-	} else {
-		router = netstack.Single(cfg.Dialer)
-	}
+	// Выход один: наружу с этого узла. Выбор выхода по src-адресу клиента убран
+	// вместе с аутбаундами — маршрут задаётся меткой в самом флоу (Qd-Route), а
+	// не тем, из какой подсети пула клиент отправил пакет.
+	router := netstack.Single(cfg.Dialer)
 
 	// Витрина одна на оба транспорта. Общий экземпляр принципиален: таблица
 	// лимита у него внутри, а браузер после Alt-Svc уходит на HTTP/3 — с
@@ -179,12 +166,6 @@ func Run(ctx context.Context, cfg Config) error {
 			mux.Handle(cfg.AdminPath, adminDNS(cfg))
 			log.Printf("admin-API DNS на %s", cfg.AdminPath)
 		}
-	}
-
-	// Admin-API управления выходами (outbounds CRUD + горячий Reload).
-	if cfg.AdminOutboundsPath != "" && cfg.Outbounds != nil {
-		mux.Handle(cfg.AdminOutboundsPath, adminOutbounds(cfg))
-		log.Printf("admin-API выходов на %s", cfg.AdminOutboundsPath)
 	}
 
 	// Учёт клиентов: раньше жил только в CLI узла, то есть требовал ssh. Панель
@@ -242,18 +223,16 @@ func Run(ctx context.Context, cfg Config) error {
 		go sweepSessions(ctx, cfg)
 	}
 
-	// Публикация выходов клиенту (метка+подсеть, без секретов) — по ним клиент
-	// строит соответствие «метка правила → src/Qd-Route». Доступ любому своему
-	// (авторизованному), не только admin: клиенту это нужно для роутинга.
-	if cfg.OutboundsPath != "" && cfg.Outbounds != nil {
-		mux.HandleFunc(cfg.OutboundsPath, func(w http.ResponseWriter, r *http.Request) {
-			if !sessionAllowed(r.Context(), cfg) {
-				site.ServeHTTP(w, r)
-				return
-			}
-			writeJSON(w, cfg.Outbounds.Public())
-		})
-		log.Printf("выходы клиенту на %s", cfg.OutboundsPath)
+	// Куда клиент может направить трафик: узлы сети и их категории. Из этого
+	// клиент строит правила («это — на выход в Германии»), метка едет в Qd-Route.
+	//
+	// Раньше здесь публиковались аутбаунды — ручные связи между узлами с
+	// подсетью на каждую. Их больше нет: узлы равны, маршрут живёт в метке
+	// трафика, а список узлов приезжает репликацией. Доступ любому своему, не
+	// только admin: секретов тут нет, а клиенту это нужно для роутинга.
+	if cfg.ExitsPath != "" && cfg.Store != nil {
+		mux.Handle(cfg.ExitsPath, serveExits(cfg, site))
+		log.Printf("выходы клиенту на %s", cfg.ExitsPath)
 	}
 	// Авторизация сессии: клиент предъявляет токен ДО connect-ip. Проверяем один
 	// раз на QUIC-сессию — connect-ip и все CONNECT-стримы идут по ней же и
@@ -485,13 +464,11 @@ func assignFor(ctx context.Context, cfg Config) ([]netip.Prefix, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Без роутинга — один /32 (как раньше). С выходами — тот же хост-номер во всех
-	// outbound-подсетях: клиент шлёт с нужного src, узел роутит по подсети.
-	if cfg.Outbounds == nil {
-		return []netip.Prefix{netip.PrefixFrom(addr, addr.BitLen())}, nil
-	}
-	host := hostFromAddr(cfg.Outbounds.BaseSubnet(), addr)
-	return cfg.Outbounds.AddrsForHost(host), nil
+	// Один адрес на клиента. Раньше их выдавалось по одному на каждый выход —
+	// клиент выбирал выход тем, из какой подсети шлёт. Схема требовала знать все
+	// выходы заранее и разваливалась при смене топологии; теперь маршрут едет
+	// меткой в самом флоу, и адрес нужен ровно один.
+	return []netip.Prefix{netip.PrefixFrom(addr, addr.BitLen())}, nil
 }
 
 // serveConnect обслуживает CONNECT-туннель одного TCP-флоу: соединяется с

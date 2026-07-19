@@ -20,12 +20,6 @@ type Store interface {
 	// AllocateAddress — стабильный адрес клиента из пула по хешу токена (выделяет
 	// при первом обращении). ErrPoolExhausted, если свободных нет.
 	AllocateAddress(ctx context.Context, hash string, pool netip.Prefix) (netip.Addr, error)
-	// ListOutbounds — включённые выходы узла (для сборки роутера).
-	ListOutbounds(ctx context.Context) ([]OutboundRow, error)
-	// PutOutbound — добавить/обновить выход по label.
-	PutOutbound(ctx context.Context, o OutboundRow) error
-	// DeleteOutbound — удалить выход по label.
-	DeleteOutbound(ctx context.Context, label string) error
 	// Close закрывает хранилище.
 	Close() error
 }

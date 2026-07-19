@@ -49,9 +49,6 @@ func main() {
 	dnsGC := flag.Duration("dns-gc", time.Minute, "период мягкой очистки кеша (выброс протухшего)")
 	dbPath := flag.String("db", "", "файл БД токенов (пусто → узел ОТКРЫТ, любой клиент проходит — только для dev)")
 	poolCIDR := flag.String("pool", "10.7.0.0/16", "пул адресов клиентов (IPv4); каждому токену — стабильный адрес")
-	upstreamAddr := flag.String("upstream", "", "выход через upstream-узел host:port (цепочка); пусто → direct")
-	upstreamAuthority := flag.String("upstream-authority", "", "authority upstream-узла (пусто → host из -upstream)")
-	upstreamToken := flag.String("upstream-token", "", "node-токен для upstream-узла")
 	adminToken := flag.String("admin-token", "", "admin-токен сети из деплоя: его хеш кладётся в БД (пусто → не трогать)")
 	nodeToken := flag.String("node-token", "", "node-токен этого узла из деплоя: его хеш кладётся в БД (пусто → не трогать)")
 	masterAddr := flag.String("master", "",
@@ -173,7 +170,6 @@ func main() {
 		DNSGCEvery:         *dnsGC,
 		AuthPath:           "/qd-auth",
 		AdminPath:          "/qd-admin/dns",
-		AdminOutboundsPath: "/qd-admin/outbounds",
 		AdminUsersPath:     "/qd-admin/users",
 		AdminSessionsPath:  "/qd-admin/sessions",
 		AdminStatsPath:     "/qd-admin/stats",
@@ -183,7 +179,7 @@ func main() {
 		AdminClusterPath:   "/qd-admin/cluster",
 		ReplicaPath:        server.ReplicaPath,
 		HeartbeatPath:      server.HeartbeatPath,
-		OutboundsPath:      "/qd-outbounds",
+		ExitsPath:          "/qd-exits",
 		Store:              storeOrNil(live),
 		Pool:               poolFor(store, *poolCIDR),
 		TLS:                tlsConf,
@@ -198,35 +194,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	// Выходы узла (arch: роутинг/цепочки). direct + chain-выходы из БД; admin
-	// перенастраивает через API. Пул делится на подсети (по одной на выход); клиент
-	// шлёт с src нужной подсети (UDP) или ставит метку Qd-Route (TCP).
 	if store != nil {
-		obs := server.NewOutbounds(cfg.Pool, netstack.NetDialer{}, chainDialer(ctx))
-		defer obs.Close()
-
-		// Разовый выход из флага -upstream — сеем в БД как chain "chain" (обратная
-		// совместимость + удобно поднять стенд одной командой).
-		if *upstreamAddr != "" {
-			auth := *upstreamAuthority
-			if auth == "" {
-				h, _, _ := net.SplitHostPort(*upstreamAddr)
-				auth = h
-			}
-			if err := store.PutOutbound(ctx, db.OutboundRow{
-				Label: "chain", Type: db.OutChain, Addr: *upstreamAddr,
-				Authority: auth, Token: *upstreamToken, Enabled: true,
-			}); err != nil {
-				log.Printf("seed outbound: %v", err)
-			}
-		}
-		if err := obs.Reload(ctx, store); err != nil {
-			log.Fatalf("выходы: %v", err)
-		}
-		cfg.Outbounds = obs
-		cfg.OutboundStore = store
-		log.Printf("выходы: %v", obs.Labels())
-
 		// Связи с соседними узлами из реестра. Поднимаются по мере надобности:
 		// держать соединение к каждому узлу сети незачем, а вот молча не иметь
 		// пути к нему — значит выпустить флоу не там, где просил клиент.
@@ -249,12 +217,8 @@ func main() {
 			// После подмены перечитываем то, что построено по базе: иначе
 			// свежий реестр лежал бы в базе, а узел ходил бы по старому.
 			OnUpdate: func(c context.Context) {
-				fresh := live.DB()
-				if err := links.Reload(c, fresh); err != nil {
+				if err := links.Reload(c, live.DB()); err != nil {
 					log.Printf("реестр узлов после репликации: %v", err)
-				}
-				if err := obs.Reload(c, fresh); err != nil {
-					log.Printf("выходы после репликации: %v", err)
 				}
 			},
 		}
@@ -318,27 +282,6 @@ func nodeDialer(base context.Context) server.NodeDialer {
 		// отдельные флоу.
 		link, err := cip.DialLink(base, node.Addr, tlsConf, selfToken,
 			"https://"+authority+"/qd-auth")
-		if err != nil {
-			return nil, nil, err
-		}
-		return chain.New(link.H3Conn(), authority), link, nil
-	}
-}
-
-// chainDialer — фабрика chain-выходов для менеджера outbounds. Живёт в main, а не
-// в server: cip импортирует server (Template), прямой импорт дал бы цикл.
-func chainDialer(base context.Context) server.ChainDialer {
-	return func(_ context.Context, addr, authority, token string) (netstack.Dialer, io.Closer, error) {
-		if authority == "" {
-			h, _, _ := net.SplitHostPort(addr)
-			authority = h
-		}
-		sni, _, _ := net.SplitHostPort(addr)
-		tlsConf := &tls.Config{InsecureSkipVerify: true, ServerName: sni}
-		// Без connect-ip: и TCP, и UDP уходят стримами, а туннель только выделил
-		// бы узлу адрес из клиентского пула, которым он не пользуется.
-		// base-контекст (жизнь узла), а не dctx запроса: цепочка живёт долго.
-		link, err := cip.DialLink(base, addr, tlsConf, token, "https://"+authority+"/qd-auth")
 		if err != nil {
 			return nil, nil, err
 		}

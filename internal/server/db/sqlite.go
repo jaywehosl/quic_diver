@@ -60,24 +60,6 @@ CREATE TABLE IF NOT EXISTS assignments (
 -- Один адрес — одному клиенту: страховка от гонки аллокатора на уровне схемы.
 CREATE UNIQUE INDEX IF NOT EXISTS assignments_addr ON assignments(addr);
 
--- Выходы узла (arch: роутинг/цепочки). direct — выход в реальную сеть; chain —
--- через upstream-узел (addr/authority/token — куда и чем авторизоваться).
---
--- token тут ОТКРЫТЫЙ (node-токен, узел предъявляет его upstream'у) — это секрет
--- узла, в отличие от клиентских токенов (только хеш). Поэтому outbounds
--- локальны узлу и НЕ реплицируются: расходятся по сети хеши клиентских токенов,
--- а секреты выходов у каждого узла свои.
-CREATE TABLE IF NOT EXISTS outbounds (
-	id         INTEGER PRIMARY KEY AUTOINCREMENT,
-	label      TEXT UNIQUE NOT NULL,        -- метка (Qd-Route / подсеть выхода)
-	type       TEXT NOT NULL,               -- direct | chain
-	addr       TEXT NOT NULL DEFAULT '',    -- chain: host:port upstream-узла
-	authority  TEXT NOT NULL DEFAULT '',    -- chain: authority upstream-узла
-	token      TEXT NOT NULL DEFAULT '',    -- chain: node-токен (секрет)
-	enabled    INTEGER NOT NULL DEFAULT 1,
-	updated_at INTEGER NOT NULL
-);
-
 -- Состояние кластера: кто мастер и какого он поколения.
 --
 -- Поколение (epoch) — защита от split-brain. Мастер пишет БД, реплики только

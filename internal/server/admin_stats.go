@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -55,7 +56,9 @@ type nodeStats struct {
 	Host    hostStats   `json:"host"`
 	DNS     any         `json:"dns,omitempty"`
 	Clients clientStats `json:"clients"`
-	Outputs []string    `json:"outbounds,omitempty"`
+	// Peers — соседние узлы, с которыми узел на связи. Прежнее поле outbounds
+	// (ручные выходы) ушло вместе с ними: маршрут живёт в метке трафика.
+	Peers   []string    `json:"peers,omitempty"`
 }
 
 type goStats struct {
@@ -111,8 +114,11 @@ func adminStats(cfg Config) http.Handler {
 		if cfg.Resolver != nil {
 			st.DNS = dnsState(cfg.Resolver)
 		}
-		if cfg.Outbounds != nil {
-			st.Outputs = cfg.Outbounds.Labels()
+		if cfg.Links != nil {
+			for _, n := range cfg.Links.Nodes() {
+				st.Peers = append(st.Peers, n.ID)
+			}
+			sort.Strings(st.Peers)
 		}
 		if store, ok := sqliteOf(cfg.Store); ok {
 			st.Clients = clientSnapshot(r.Context(), store)

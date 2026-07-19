@@ -37,12 +37,8 @@ func main() {
 	cacheSize := flag.Int("cache", -1, "новый размер кеша (записей)")
 	ttl := flag.Int("ttl", -1, "TTL override, секунд (0 — из ответа)")
 	flush := flag.String("flush", "", "очистить кеш: expired | all")
-	// управление выходами
-	outbounds := flag.Bool("outbounds", false, "показать выходы узла")
-	addChain := flag.String("add-chain", "", "добавить chain-выход: label=addr (напр. eu=1.2.3.4:443)")
-	chainAuth := flag.String("chain-authority", "", "authority chain-выхода")
-	chainTok := flag.String("chain-token", "", "node-токен chain-выхода")
-	delOut := flag.String("del-outbound", "", "удалить выход по label")
+	// Узлы сети (прежние ручные выходы убраны — маршрут живёт в метке трафика).
+	nodes := flag.Bool("nodes", false, "показать узлы сети")
 	// Универсальный вызов: под каждый новый admin-эндпоинт заводить свой флаг —
 	// плодить сущности, а API растёт (клиенты, сессии, состояние узла).
 	path := flag.String("path", "", "произвольный admin-путь, напр. /qd-admin/users")
@@ -83,24 +79,8 @@ func main() {
 		return
 	}
 
-	obURL := "https://" + *authority + "/qd-admin/outbounds"
-	switch {
-	case *outbounds:
-		show(ctx, cc, http.MethodGet, obURL, nil)
-		return
-	case *addChain != "":
-		label, addr, ok := strings.Cut(*addChain, "=")
-		if !ok {
-			log.Fatal("формат -add-chain: label=host:port")
-		}
-		body, _ := json.Marshal(map[string]any{
-			"label": label, "type": "chain", "addr": addr,
-			"authority": *chainAuth, "token": *chainTok,
-		})
-		show(ctx, cc, http.MethodPost, obURL, body)
-		return
-	case *delOut != "":
-		show(ctx, cc, http.MethodDelete, obURL+"?label="+*delOut, nil)
+	if *nodes {
+		show(ctx, cc, http.MethodGet, "https://"+*authority+"/qd-admin/nodes", nil)
 		return
 	}
 

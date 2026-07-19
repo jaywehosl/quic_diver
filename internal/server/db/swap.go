@@ -225,16 +225,4 @@ func (l *Live) AllocateAddress(ctx context.Context, hash string, pool netip.Pref
 	return l.DB().AllocateAddress(ctx, hash, pool)
 }
 
-func (l *Live) ListOutbounds(ctx context.Context) ([]OutboundRow, error) {
-	return l.DB().ListOutbounds(ctx)
-}
-
-func (l *Live) PutOutbound(ctx context.Context, o OutboundRow) error {
-	return l.DB().PutOutbound(ctx, o)
-}
-
-func (l *Live) DeleteOutbound(ctx context.Context, label string) error {
-	return l.DB().DeleteOutbound(ctx, label)
-}
-
 var _ Store = (*Live)(nil)

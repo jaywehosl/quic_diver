@@ -27,7 +27,7 @@ import (
 //
 // Второй результат — контекст для транзита: в нём уменьшенный hop-limit и метка.
 func routeFlow(ctx context.Context, cfg Config, r *http.Request, hops int) (netstack.Dialer, context.Context) {
-	raw := r.Header.Get(RouteHeader)
+	raw := r.Header.Get(routing.HeaderName)
 	route, err := routing.Parse(raw)
 	if err != nil {
 		// Битая метка — не повод рвать связь: выпускаем здесь. Но молчать нельзя,
@@ -57,18 +57,13 @@ func routeFlow(ctx context.Context, cfg Config, r *http.Request, hops int) (nets
 }
 
 // exitDialer — выход наружу с этого узла.
-func (cfg Config) exitDialer() netstack.Dialer {
-	if cfg.Outbounds != nil {
-		return cfg.Outbounds.Direct()
-	}
-	return cfg.Dialer
-}
+func (cfg Config) exitDialer() netstack.Dialer { return cfg.Dialer }
 
 // transitDialer — соединение к соседнему узлу (nil, если вести туда нечем).
 //
-// Сначала реестр: узлы равны, связь поднимается по адресу из общей реплики, а
-// представляемся своим токеном. Аутбаунды остаются запасным путём, пока стенды
-// живут на них, — уйдут вместе с последней ручной связью.
+// Узлы равны: связь поднимается по адресу из общей реплики, а представляемся
+// своим токеном. Ручных связей (аутбаундов) больше нет — они требовали чужой
+// секрет в конфиге и прибивали цепочку к нему.
 func (cfg Config) transitDialer(ctx context.Context, node string) netstack.Dialer {
 	if node == "" {
 		return nil
@@ -77,9 +72,6 @@ func (cfg Config) transitDialer(ctx context.Context, node string) netstack.Diale
 		if d := cfg.Links.Dialer(ctx, node); d != nil {
 			return d
 		}
-	}
-	if cfg.Outbounds != nil {
-		return cfg.Outbounds.Transit(node)
 	}
 	return nil
 }

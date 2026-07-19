@@ -125,8 +125,15 @@ func main() {
 		log.Print("ВНИМАНИЕ: -db не задан — узел ОТКРЫТ, авторизации нет (только dev)")
 	}
 
+	// Идентификатор узла в сети: по нему он понимает, он ли выход из метки.
+	nodeID := *authority
+	if h, _, err := net.SplitHostPort(nodeID); err == nil {
+		nodeID = h
+	}
+
 	cfg := server.Config{
 		Listen:             *listen,
+		NodeID:             nodeID,
 		Authority:          *authority,
 		ConnectIPPath:      "/connect-ip",
 		Resolver:           resolver,
@@ -184,6 +191,19 @@ func main() {
 		cfg.Outbounds = obs
 		cfg.OutboundStore = store
 		log.Printf("выходы: %v", obs.Labels())
+
+		// Связи с соседними узлами из реестра. Поднимаются по мере надобности:
+		// держать соединение к каждому узлу сети незачем, а вот молча не иметь
+		// пути к нему — значит выпустить флоу не там, где просил клиент.
+		links := server.NewNodeLinks(cfg.NodeID, *nodeToken, nodeDialer(ctx))
+		defer links.Close()
+		if err := links.Reload(ctx, store); err != nil {
+			log.Printf("реестр узлов: %v", err)
+		}
+		cfg.Links = links
+		if n := len(links.Nodes()); n > 0 {
+			log.Printf("соседей в реестре: %d", n)
+		}
 	}
 
 	log.Printf("узел на %s (authority=%s, назначаю клиенту %s)", *listen, *authority, *assign)
@@ -191,6 +211,32 @@ func main() {
 		log.Fatalf("run: %v", err)
 	}
 	log.Print("остановлен")
+}
+
+// nodeDialer — фабрика связей с соседними узлами из реестра.
+//
+// Узел предъявляет СВОЙ токен, а сосед сверяет его с хешем из общей реплики:
+// чужих секретов ни у кого нет, поэтому утечка одного узла не открывает
+// остальные, и копировать токены между машинами не нужно.
+func nodeDialer(base context.Context) server.NodeDialer {
+	return func(_ context.Context, node db.Node, selfToken string) (netstack.Dialer, io.Closer, error) {
+		authority := node.Authority()
+		sni, _, _ := net.SplitHostPort(node.Addr)
+		if sni == "" {
+			sni = authority
+		}
+		tlsConf := &tls.Config{InsecureSkipVerify: true, ServerName: sni}
+		// Связь без connect-ip: сосед ходит стримами, и туннель ему только выделил
+		// бы адрес из клиентского пула, которым он не пользуется.
+		// base-контекст (жизнь узла), а не контекст запроса: связь переживает
+		// отдельные флоу.
+		link, err := cip.DialLink(base, node.Addr, tlsConf, selfToken,
+			"https://"+authority+"/qd-auth")
+		if err != nil {
+			return nil, nil, err
+		}
+		return chain.New(link.H3Conn(), authority), link, nil
+	}
 }
 
 // chainDialer — фабрика chain-выходов для менеджера outbounds. Живёт в main, а не
@@ -201,17 +247,16 @@ func chainDialer(base context.Context) server.ChainDialer {
 			h, _, _ := net.SplitHostPort(addr)
 			authority = h
 		}
-		tmpl := server.Template(authority, "/connect-ip")
 		sni, _, _ := net.SplitHostPort(addr)
 		tlsConf := &tls.Config{InsecureSkipVerify: true, ServerName: sni}
+		// Без connect-ip: и TCP, и UDP уходят стримами, а туннель только выделил
+		// бы узлу адрес из клиентского пула, которым он не пользуется.
 		// base-контекст (жизнь узла), а не dctx запроса: цепочка живёт долго.
-		client, _, err := cip.DialAuth(base, addr, tmpl, tlsConf, token, "https://"+authority+"/qd-auth")
+		link, err := cip.DialLink(base, addr, tlsConf, token, "https://"+authority+"/qd-auth")
 		if err != nil {
 			return nil, nil, err
 		}
-		// Адрес от upstream-узла больше не нужен: и TCP, и UDP уходят стримами,
-		// а не сырыми пакетами с назначенного адреса.
-		return chain.New(client.H3Conn(), authority), client, nil
+		return chain.New(link.H3Conn(), authority), link, nil
 	}
 }
 

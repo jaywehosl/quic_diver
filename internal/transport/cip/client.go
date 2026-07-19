@@ -162,3 +162,49 @@ func ensureH3(t *tls.Config) *tls.Config {
 	}
 	return t
 }
+
+// Link — соединение с узлом БЕЗ connect-ip туннеля: только авторизованная
+// QUIC/H3-сессия, по которой открываются CONNECT-стримы.
+//
+// Для транзита между узлами connect-ip не нужен и вреден: он выделяет соседу
+// адрес из клиентского пула, хотя тот ходит стримами и никакого IP-адреса не
+// использует. Клиенту туннель по-прежнему нужен (сырые пакеты, ADDRESS_ASSIGN),
+// соседу — нет.
+type Link struct {
+	qc *quicconn.Conn
+	h3 *http3.Transport
+	cc *http3.ClientConn
+}
+
+// H3Conn — соединение для CONNECT и CONNECT-UDP стримов.
+func (l *Link) H3Conn() *http3.ClientConn { return l.cc }
+
+// Context закрывается со смертью QUIC-сессии.
+func (l *Link) Context() context.Context { return l.qc.QUIC().Context() }
+
+// Close гасит соединение.
+func (l *Link) Close() error {
+	l.h3.Close()
+	return l.qc.Close()
+}
+
+// DialLink поднимает авторизованную сессию с узлом без connect-ip.
+func DialLink(ctx context.Context, endpoint string, tlsConf *tls.Config, token, authURL string) (*Link, error) {
+	qcAny, err := quicconn.Dialer{TLS: ensureH3(tlsConf)}.Dial(ctx, endpoint)
+	if err != nil {
+		return nil, err
+	}
+	qc := qcAny.(*quicconn.Conn)
+
+	h3tr := &http3.Transport{EnableDatagrams: true}
+	cc := h3tr.NewClientConn(qc.QUIC())
+
+	if authURL != "" {
+		if err := authorize(ctx, cc, token, authURL); err != nil {
+			h3tr.Close()
+			qc.Close()
+			return nil, err
+		}
+	}
+	return &Link{qc: qc, h3: h3tr, cc: cc}, nil
+}

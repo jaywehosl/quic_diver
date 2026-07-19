@@ -56,6 +56,9 @@ type Config struct {
 	// Dialer — выход по умолчанию (dev/один выход): direct или chain. Используется,
 	// когда Outbounds == nil.
 	Dialer netstack.Dialer
+	// Links — связи с соседними узлами из реестра. Заменяет ручные аутбаунды:
+	// узел берёт соседа из общей реплики и представляется своим токеном.
+	Links *NodeLinks
 	// Outbounds — живой набор выходов с роутингом (из БД, перенастраивается admin).
 	// nil → один Dialer без роутинга.
 	Outbounds *Outbounds
@@ -406,12 +409,25 @@ func authorize(ctx context.Context, cfg Config, sess *auth.Session, token string
 	if cfg.Store == nil {
 		return false
 	}
-	info, err := cfg.Store.Lookup(ctx, auth.Hash(token))
-	if err != nil {
-		return false // нет токена, отозван или ошибка БД — не пускаем
+	hash := auth.Hash(token)
+	if info, err := cfg.Store.Lookup(ctx, hash); err == nil {
+		sess.Authorize(info.Role, hash)
+		return true
 	}
-	sess.Authorize(info.Role, auth.Hash(token))
-	return true
+	// Не клиент и не админ — может быть соседний узел. Он предъявляет СВОЙ
+	// токен, а мы сверяем его с хешем из реплики: чужих секретов у нас нет и
+	// быть не должно, иначе утечка одного узла открывала бы всю сеть.
+	if store, ok := cfg.Store.(*db.SQLite); ok {
+		if node, err := store.NodeByTokenHash(ctx, hash); err == nil {
+			sess.Authorize(auth.RoleNode, hash)
+			// Отмечаем соседа живым: раз он пришёл, он на связи. Отдельный
+			// heartbeat нужен для простаивающих узлов, но транзит — сам по себе
+			// доказательство жизни.
+			_ = store.TouchNode(ctx, node.ID)
+			return true
+		}
+	}
+	return false // нет токена, отозван или ошибка БД — не пускаем
 }
 
 // sessionAllowed — доверенная ли текущая сессия. Если Store не задан (dev-режим,

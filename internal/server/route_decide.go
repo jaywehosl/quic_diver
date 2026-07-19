@@ -41,7 +41,7 @@ func routeFlow(ctx context.Context, cfg Config, r *http.Request, hops int) (nets
 		return cfg.exitDialer(), ctx
 	}
 
-	dialer := cfg.transitDialer(next)
+	dialer := cfg.transitDialer(ctx, next)
 	if dialer == nil {
 		// Узел из метки нам неизвестен: выпускаем наружу здесь, а не глушим —
 		// остаться без связи хуже, чем выйти не из той страны.
@@ -64,16 +64,32 @@ func (cfg Config) exitDialer() netstack.Dialer {
 	return cfg.Dialer
 }
 
-// transitDialer — соединение к соседнему узлу (nil, если такого не знаем).
-func (cfg Config) transitDialer(node string) netstack.Dialer {
-	if cfg.Outbounds == nil || node == "" {
+// transitDialer — соединение к соседнему узлу (nil, если вести туда нечем).
+//
+// Сначала реестр: узлы равны, связь поднимается по адресу из общей реплики, а
+// представляемся своим токеном. Аутбаунды остаются запасным путём, пока стенды
+// живут на них, — уйдут вместе с последней ручной связью.
+func (cfg Config) transitDialer(ctx context.Context, node string) netstack.Dialer {
+	if node == "" {
 		return nil
 	}
-	return cfg.Outbounds.Transit(node)
+	if cfg.Links != nil {
+		if d := cfg.Links.Dialer(ctx, node); d != nil {
+			return d
+		}
+	}
+	if cfg.Outbounds != nil {
+		return cfg.Outbounds.Transit(node)
+	}
+	return nil
 }
 
-// pickNode выберет лучший узел категории, когда появится реестр узлов.
+// pickNode выбирает узел категории для метки auto:<тег>.
 //
-// Пока выбирать не из чего: пусто означает «подходящих нет», и флоу выйдет на
-// текущем узле — то же поведение, что при недоступной категории.
-func (cfg Config) pickNode(tag string) string { return "" }
+// Пусто означает «подходящих нет» — флоу выйдет на текущем узле, а не умрёт.
+func (cfg Config) pickNode(tag string) string {
+	if cfg.Links == nil {
+		return ""
+	}
+	return cfg.Links.pickByCategory(tag)
+}

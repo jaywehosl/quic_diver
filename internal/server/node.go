@@ -35,6 +35,9 @@ import (
 type Config struct {
 	// Listen — UDP-адрес прослушивания QUIC, напр. ":8443".
 	Listen string
+	// NodeID — идентификатор этого узла в сети. По нему узел понимает, он ли
+	// выход, указанный в метке маршрута. Пусто → берётся Authority.
+	NodeID string
 	// Authority — host[:port] в connect-ip URI (должен совпадать с :authority,
 	// который шлёт клиент). Напр. "localhost:8443".
 	Authority string
@@ -114,6 +117,10 @@ func Run(ctx context.Context, cfg Config) error {
 	_ = udp.SetReadBuffer(2 << 20)
 	_ = udp.SetWriteBuffer(2 << 20)
 
+	// Идентификатор узла: по нему он понимает, он ли выход из метки маршрута.
+	if cfg.NodeID == "" {
+		cfg.NodeID = cfg.Authority
+	}
 	tmpl := Template(cfg.Authority, cfg.ConnectIPPath)
 	proxy := &connectip.Proxy{}
 
@@ -468,11 +475,8 @@ func serveConnect(w http.ResponseWriter, r *http.Request, cfg Config) {
 	// Выход для этого флоу: TCP идёт CONNECT-стримом (мимо IP-слоя), поэтому метка
 	// маршрута едет заголовком, а не src-адресом (как у датаграмм). Клиент ставит
 	// Qd-Route по своему правилу; пусто/неизвестно → выход по умолчанию (direct).
-	dialer := cfg.Dialer
-	if cfg.Outbounds != nil {
-		dialer = cfg.Outbounds.DialerForLabel(r.Header.Get(RouteHeader))
-	}
-	ctx, cancel := context.WithTimeout(chain.WithHops(r.Context(), hops-1), 15*time.Second)
+	dialer, rctx := routeFlow(r.Context(), cfg, r, hops)
+	ctx, cancel := context.WithTimeout(rctx, 15*time.Second)
 	out, err := dialer.DialTCP(ctx, dst)
 	cancel()
 	if err != nil {

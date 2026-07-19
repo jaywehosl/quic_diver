@@ -54,13 +54,10 @@ func serveConnectUDP(cfg Config) http.Handler {
 			return
 		}
 
-		// Выход для флоу: та же метка, что у TCP. Пусто/неизвестно → выход по
-		// умолчанию.
-		dialer := cfg.Dialer
-		if cfg.Outbounds != nil {
-			dialer = cfg.Outbounds.DialerForLabel(r.Header.Get(RouteHeader))
-		}
-		dctx, cancel := context.WithTimeout(chain.WithHops(r.Context(), hops-1), 15*time.Second)
+		// Решение по метке — тем же кодом, что у TCP: узел либо выпускает здесь,
+		// либо ведёт транзитом, передавая метку следующему.
+		dialer, rctx := routeFlow(r.Context(), cfg, r, hops)
+		dctx, cancel := context.WithTimeout(rctx, 15*time.Second)
 		out, err := dialer.DialUDP(dctx, dst)
 		cancel()
 		if err != nil {

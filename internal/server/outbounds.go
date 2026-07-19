@@ -202,3 +202,26 @@ func (o *Outbounds) Close() {
 }
 
 var _ netstack.Router = (*Outbounds)(nil)
+
+// Direct — выход в реальную сеть с этого узла.
+func (o *Outbounds) Direct() netstack.Dialer {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	return o.direct
+}
+
+// Transit — соединение к соседнему узлу по его идентификатору (nil, если такого
+// не знаем).
+//
+// Пока «кого мы знаем» — это метки chain-выходов из БД. С появлением реестра
+// узлов сюда придёт он, а сигнатура останется прежней.
+func (o *Outbounds) Transit(node string) netstack.Dialer {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	for i := range o.list {
+		if o.list[i].Label == node && o.list[i].Dialer != o.direct {
+			return o.list[i].Dialer
+		}
+	}
+	return nil
+}

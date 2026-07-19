@@ -53,19 +53,32 @@ func TestHopsExhaustedOrGarbage(t *testing.T) {
 // На исчерпанном лимите Dialer не открывает стрим — иначе петля A→B→A крутилась
 // бы, пока не кончатся стримы.
 func TestDialTCPRefusesAtZeroHops(t *testing.T) {
-	d := New(nil, nil, netip.Addr{}) // cc не нужен: до него не дойдёт
+	d := New(nil, "upstream.example") // cc не нужен: до него не дойдёт
 	ctx := WithHops(context.Background(), 0)
 	if _, err := d.DialTCP(ctx, mustAddrPort()); err == nil {
 		t.Fatal("dial при нулевом hop-limit прошёл — защита от петли не работает")
 	}
 }
 
-// Без пакетного туннеля UDP обязан ОТКАЗАТЬ, а не выйти мимо цепочки: иначе
-// UDP-выход выдал бы адрес транзитного узла вместо адреса цепочки.
-func TestDialUDPRefusedWithoutTunnel(t *testing.T) {
-	d := New(nil, nil, netip.Addr{})
-	if _, err := d.DialUDP(context.Background(), mustAddrPort()); err != ErrUDPUnsupported {
-		t.Fatalf("DialUDP вернул %v, ожидался ErrUDPUnsupported", err)
+// UDP защищён от петли так же, как TCP: он тоже идёт стримом с hop-limit, а не
+// сырыми датаграммами, у которых заголовков нет.
+func TestDialUDPRefusesAtZeroHops(t *testing.T) {
+	d := New(nil, "upstream.example")
+	ctx := WithHops(context.Background(), 0)
+	if _, err := d.DialUDP(ctx, mustAddrPort()); err == nil {
+		t.Fatal("UDP-dial при нулевом hop-limit прошёл — защита от петли не работает")
+	}
+}
+
+// Метка маршрута доезжает из контекста в заголовок: без этого следующий узел не
+// узнал бы, куда вести дальше, и выпустил бы флоу у себя.
+func TestRouteTravelsInContext(t *testing.T) {
+	ctx := WithRoute(context.Background(), "n4")
+	if got := routeFrom(ctx); got != "n4" {
+		t.Fatalf("метка из контекста = %q", got)
+	}
+	if got := routeFrom(context.Background()); got != "" {
+		t.Fatalf("без метки получено %q", got)
 	}
 }
 

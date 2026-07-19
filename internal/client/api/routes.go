@@ -306,3 +306,66 @@ func (d Deps) readNotices(w http.ResponseWriter, r *http.Request) {
 	}
 	d.listNotices(w, r)
 }
+
+// --- подписка ---
+
+// applyBundle принимает ссылку-бандл и настраивает клиента по ней.
+//
+// Единственный способ настроить клиента с нуля для человека: он получает
+// приложение и ссылку, вставляет её — и всё. Ручной ввод адреса, порта, SNI и
+// токена по отдельности — путь, на котором ошибаются все.
+func (d Deps) applyBundle(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Link string `json:"link"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	b, err := config.ParseBundle(req.Link)
+	if err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	cfg := d.Config.Get()
+	cfg.Apply(b)
+	if err := d.Config.Save(cfg); err != nil {
+		fail(w, http.StatusInternalServerError, err)
+		return
+	}
+	// Управляющая связь идёт к узлу из настроек — сообщаем ей о смене сразу.
+	d.Control.SetNode(cfg.Node.Entries, cfg.Node.Token)
+	writeJSON(w, map[string]any{
+		"applied": true,
+		"name":    b.N,
+		"entries": len(cfg.Node.Entries),
+	})
+}
+
+// subscription отдаёт панели то, что прислала сеть.
+func (d Deps) subscription(w http.ResponseWriter, r *http.Request) {
+	if d.Subscribe == nil {
+		fail(w, http.StatusNotImplemented, errors.New("подписка не подключена"))
+		return
+	}
+	// ?refresh=1 — сходить к узлу прямо сейчас: человек нажал «обновить» и ждёт
+	// свежих данных, а не той копии, что лежит с прошлого часа.
+	if r.URL.Query().Get("refresh") != "" {
+		if sub, err := d.Subscribe.Fetch(r.Context()); err == nil {
+			writeJSON(w, sub)
+			return
+		} else {
+			fail(w, http.StatusBadGateway, err)
+			return
+		}
+	}
+	sub, err := d.Subscribe.Last()
+	if sub == nil {
+		if err == nil {
+			err = errors.New("подписка ещё не приходила")
+		}
+		fail(w, http.StatusServiceUnavailable, err)
+		return
+	}
+	writeJSON(w, sub)
+}

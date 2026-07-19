@@ -36,7 +36,7 @@ func adminUsers(cfg Config) http.Handler {
 		case http.MethodGet:
 			listUsers(w, r, store)
 		case http.MethodPost:
-			createUser(w, r, store)
+			createUser(w, r, store, cfg)
 		case http.MethodPatch:
 			patchUser(w, r, store)
 		case http.MethodDelete:
@@ -148,7 +148,7 @@ type createReq struct {
 	ExpiresInDays int    `json:"expires_in_days,omitempty"`
 }
 
-func createUser(w http.ResponseWriter, r *http.Request, store *db.SQLite) {
+func createUser(w http.ResponseWriter, r *http.Request, store *db.SQLite, cfg Config) {
 	var req createReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "битый json", http.StatusBadRequest)
@@ -181,10 +181,15 @@ func createUser(w http.ResponseWriter, r *http.Request, store *db.SQLite) {
 		return
 	}
 	// Открытый токен виден один раз: в базе только хеш, повторно не показать.
+	//
+	// Вместе с ним отдаём готовую ссылку: человеку нужно передать одну строку,
+	// а не диктовать адрес, порт, SNI и токен по отдельности — на этом пути
+	// ошибаются все.
 	writeJSON(w, map[string]any{
-		"token": token,
-		"hash":  hash,
-		"note":  "токен показывается один раз — сохраните его сейчас",
+		"token":  token,
+		"hash":   hash,
+		"bundle": bundleFor(r.Context(), store, cfg, token),
+		"note":   "токен показывается один раз — сохраните ссылку сейчас",
 	})
 }
 

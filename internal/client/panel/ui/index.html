@@ -29,6 +29,7 @@
   <a href="#rules" data-tab="rules">Правила</a>
   <a href="#node" data-tab="node">Подключение</a>
   <a href="#exits" data-tab="exits">Выходы</a>
+  <a href="#sub" data-tab="sub">Подписка</a>
   <a href="#notices" data-tab="notices">Уведомления<span class="badge" id="unread" hidden></span></a>
   <a href="#admin" data-tab="admin">Сеть</a>
   <a href="#help" data-tab="help">Справка</a>
@@ -88,6 +89,17 @@
 
 <!-- ПОДКЛЮЧЕНИЕ: узел, токен, что перехватывать. -->
 <section id="tab-node" class="tab" hidden>
+  <h2>Ссылка подключения</h2>
+  <p class="hint">
+    Получили ссылку вида <code>qd://…</code> — вставьте её сюда. Клиент настроится сам:
+    узел, резервные точки и токен приедут вместе с ней.
+  </p>
+  <div class="row">
+    <input id="bundle" placeholder="qd://…" autocomplete="off" spellcheck="false">
+    <button id="btnBundle" class="primary">Применить</button>
+    <span id="bundleMsg" class="msg"></span>
+  </div>
+
   <h2>Узел и доступ</h2>
   <p class="hint">
     Адрес — <code>хост:порт</code> или <code>IP:порт</code>. Если указан IP, впишите домен
@@ -122,6 +134,14 @@
     <button id="btnSaveNode" class="primary">Сохранить</button>
     <span id="nodeMsg" class="msg"></span>
   </div>
+</section>
+
+<!-- ПОДПИСКА: что о нас знает сеть. -->
+<section id="tab-sub" class="tab" hidden>
+  <h2>Подписка</h2>
+  <p class="hint">Что сеть сообщает о вас и о себе. Обновляется сама, обычно раз в час.</p>
+  <div class="row"><button id="btnRefreshSub">Обновить сейчас</button><span id="subMsg" class="msg"></span></div>
+  <div id="subBody"></div>
 </section>
 
 <!-- ВЫХОДЫ: что публикует узел. -->

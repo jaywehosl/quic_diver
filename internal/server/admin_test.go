@@ -96,7 +96,6 @@ func TestAdminDNSBadUpstream(t *testing.T) {
 	}
 }
 
-
 func bytesContains(b []byte, s string) bool {
 	return strings.Contains(string(b), s)
 }

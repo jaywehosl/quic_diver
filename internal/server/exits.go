@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"quicdiver/internal/server/db"
 	"sort"
 	"time"
 )
@@ -49,42 +50,49 @@ func serveExits(cfg Config, decoy http.Handler) http.Handler {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-
-		// direct первым: это выход без метки, «наружу здесь же».
-		out := []exitView{{Route: "direct", Label: "без цепочки", Alive: true}}
-		// autoAlive — есть ли живой узел под тегом/категорией.
-		autoAlive := map[string]bool{}
-
-		for _, n := range nodes {
-			if !n.Enabled {
-				continue // выведенный из сети узел клиенту предлагать незачем
-			}
-			self := n.ID == cfg.NodeID
-			alive := self || (!n.LastSeen.IsZero() && time.Since(n.LastSeen) < nodeAliveAfter)
-			out = append(out, exitView{
-				Route: n.ID, Label: n.Label, Category: n.Category,
-				Tags: n.Tags, Alive: alive, Self: self,
-			})
-			for _, tag := range append(n.Tags, n.Category) {
-				if tag == "" {
-					continue
-				}
-				autoAlive[tag] = autoAlive[tag] || alive
-			}
-		}
-
-		// auto-метки: правило «в Германию» не должно ломаться, когда конкретный
-		// немецкий узел меняют на другой.
-		autos := make([]string, 0, len(autoAlive))
-		for tag := range autoAlive {
-			autos = append(autos, tag)
-		}
-		sort.Strings(autos)
-		for _, tag := range autos {
-			out = append(out, exitView{
-				Route: "auto:" + tag, Label: tag, Auto: true, Alive: autoAlive[tag],
-			})
-		}
-		writeJSON(w, out)
+		writeJSON(w, exitsOf(nodes, cfg))
 	})
+}
+
+// exitsOf собирает метки выходов из реестра.
+//
+// Общая для /qd-exits и для подписки: клиент получает один и тот же список
+// обоими путями, и разъехаться они не могут.
+func exitsOf(nodes []db.Node, cfg Config) []exitView {
+	// direct первым: это выход без метки, «наружу здесь же».
+	out := []exitView{{Route: "direct", Label: "без цепочки", Alive: true}}
+	// autoAlive — есть ли живой узел под тегом/категорией.
+	autoAlive := map[string]bool{}
+
+	for _, n := range nodes {
+		if !n.Enabled {
+			continue // выведенный из сети узел клиенту предлагать незачем
+		}
+		self := n.ID == cfg.NodeID
+		alive := self || (!n.LastSeen.IsZero() && time.Since(n.LastSeen) < nodeAliveAfter)
+		out = append(out, exitView{
+			Route: n.ID, Label: n.Label, Category: n.Category,
+			Tags: n.Tags, Alive: alive, Self: self,
+		})
+		for _, tag := range append(n.Tags, n.Category) {
+			if tag == "" {
+				continue
+			}
+			autoAlive[tag] = autoAlive[tag] || alive
+		}
+	}
+
+	// auto-метки: правило «в Германию» не должно ломаться, когда конкретный
+	// немецкий узел меняют на другой.
+	autos := make([]string, 0, len(autoAlive))
+	for tag := range autoAlive {
+		autos = append(autos, tag)
+	}
+	sort.Strings(autos)
+	for _, tag := range autos {
+		out = append(out, exitView{
+			Route: "auto:" + tag, Label: tag, Auto: true, Alive: autoAlive[tag],
+		})
+	}
+	return out
 }

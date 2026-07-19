@@ -48,6 +48,7 @@ function showTab(name) {
     a.classList.toggle('active', a.dataset.tab === name);
   });
   if (name === 'exits') loadExits();
+  if (name === 'sub') loadSub();
   if (name === 'notices') loadNotices(true);
   if (name === 'help') loadHelp();
 }
@@ -398,3 +399,59 @@ async function loadHelp() {
   setInterval(refreshStatus, 3000);
   setInterval(loadNotices, 10000);
 })();
+
+// --- подписка и ссылка настройки ---
+
+$('btnBundle').onclick = async () => {
+  const link = $('bundle').value.trim();
+  if (!link) return;
+  try {
+    const res = await api('/api/bundle', { body: { link } });
+    say($('bundleMsg'), `настроено: ${res.entries} точк(и) входа`, 'ok');
+    $('bundle').value = '';
+    await loadConfig();
+    refreshStatus();
+    loadSub();
+  } catch (e) {
+    say($('bundleMsg'), e.message, 'err');
+  }
+};
+
+function gbNum(n) { return (Number(n || 0) / 1073741824).toFixed(2) + ' ГБ'; }
+
+async function loadSub(refresh) {
+  const box = $('subBody');
+  try {
+    const sub = await api('/api/subscription' + (refresh ? '?refresh=1' : ''));
+    const c = sub.client || {};
+    const q = c.quota || {};
+    const rows = [
+      ['Имя', c.label || '—'],
+      ['Устройств', c.devices ?? '—'],
+      ['Израсходовано', gbNum(q.used)],
+      ['Лимит', q.limit ? gbNum(q.limit) : 'без ограничения'],
+    ];
+    if (q.reset_at && !q.reset_at.startsWith('0001')) {
+      rows.push(['Период до', new Date(q.reset_at).toLocaleDateString('ru')]);
+    }
+    if (c.expires_at) rows.push(['Доступ до', new Date(c.expires_at).toLocaleDateString('ru')]);
+
+    box.innerHTML =
+      '<table class="grid">' + rows.map(([k, v]) =>
+        `<tr><th>${esc(k)}</th><td>${esc(v)}</td></tr>`).join('') + '</table>' +
+      '<h2>Точки входа</h2>' +
+      '<p class="hint">Приезжают от сети. Пробуются по порядку, если первая недоступна.</p>' +
+      '<table class="grid"><tr><th>Адрес</th><th>SNI</th><th>Состояние</th></tr>' +
+      (sub.entries || []).map((e) => `<tr>
+        <td class="mono">${esc(e.addr)}</td><td class="mono">${esc(e.sni || '')}</td>
+        <td>${e.alive ? '<span style="color:var(--ok)">живой</span>' : '<span style="color:var(--err)">молчит</span>'}</td>
+      </tr>`).join('') + '</table>' +
+      `<p class="hint">Обновлено: ${sub.at ? new Date(sub.at).toLocaleString('ru') : '—'}</p>`;
+    say($('subMsg'), '', '');
+  } catch (e) {
+    box.innerHTML = '<p class="hint">Подписка ещё не приходила — она обновляется в фоне.</p>';
+    say($('subMsg'), e.message, 'err');
+  }
+}
+
+$('btnRefreshSub').onclick = () => loadSub(true);

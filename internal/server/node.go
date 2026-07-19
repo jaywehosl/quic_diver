@@ -97,6 +97,8 @@ type Config struct {
 	// ExitsPath — путь публикации выходов клиенту (метки для правил),
 	// обычно "/qd-exits". Доступ авторизованному клиенту, секретов там нет.
 	ExitsPath string
+	// SubscriptionPath — путь подписки клиента, обычно "/qd-subscription".
+	SubscriptionPath string
 }
 
 // Template строит URI Template connect-ip эндпоинта. Клиент и узел обязаны
@@ -233,6 +235,13 @@ func Run(ctx context.Context, cfg Config) error {
 	if cfg.ExitsPath != "" && cfg.Store != nil {
 		mux.Handle(cfg.ExitsPath, serveExits(cfg, site))
 		log.Printf("выходы клиенту на %s", cfg.ExitsPath)
+	}
+	// Подписка: узлы сети, резервные точки входа и собственные лимиты клиента.
+	// Публичной страницы подписки нет намеренно — доступная всем ссылка
+	// парсится, блокируется и выдаёт состав сети перебором.
+	if cfg.SubscriptionPath != "" && cfg.Store != nil {
+		mux.Handle(cfg.SubscriptionPath, serveSubscription(cfg, site))
+		log.Printf("подписка клиенту на %s", cfg.SubscriptionPath)
 	}
 	// Авторизация сессии: клиент предъявляет токен ДО connect-ip. Проверяем один
 	// раз на QUIC-сессию — connect-ip и все CONNECT-стримы идут по ней же и

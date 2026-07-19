@@ -10,6 +10,7 @@ import (
 	"quicdiver/internal/client/control"
 	"quicdiver/internal/client/notify"
 	"quicdiver/internal/client/service"
+	"quicdiver/internal/client/subscribe"
 )
 
 // Deps — то, чем API управляет. Интерфейсами, а не готовыми объектами: панель
@@ -32,6 +33,8 @@ type Deps struct {
 	Base context.Context
 	// Notices — уведомления: то, о чём пользователь обязан узнать сам.
 	Notices Notices
+	// Subscribe — подписка: узлы сети и собственные лимиты клиента.
+	Subscribe Subscriber
 }
 
 // Sessioner — часть service.Service, нужная панели.
@@ -56,6 +59,12 @@ type Notices interface {
 	Clear()
 }
 
+// Subscriber — подписка клиента, нужная панели.
+type Subscriber interface {
+	Last() (*subscribe.Subscription, error)
+	Fetch(ctx context.Context) (*subscribe.Subscription, error)
+}
+
 // ConfigStore — чтение и запись настроек клиента.
 type ConfigStore interface {
 	Get() config.Config
@@ -74,6 +83,8 @@ func Handler(tok Token, d Deps, ui http.Handler) http.Handler {
 	mux.Handle("/api/rules/test", post(d.testRule))
 	mux.Handle("/api/exits", get(d.exits))
 	mux.Handle("/api/notifications", rw(d.listNotices, d.readNotices))
+	mux.Handle("/api/subscription", get(d.subscription))
+	mux.Handle("/api/bundle", post(d.applyBundle))
 	// Всё под /api/node/ уходит на узел как есть: admin-API уже собран, и
 	// дублировать здесь каждый его эндпоинт значило бы обновлять два места.
 	mux.Handle("/api/node/", http.HandlerFunc(d.proxy))

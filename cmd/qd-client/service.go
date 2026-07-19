@@ -15,6 +15,7 @@ import (
 	"quicdiver/internal/client/notify"
 	"quicdiver/internal/client/panel"
 	"quicdiver/internal/client/service"
+	"quicdiver/internal/client/subscribe"
 	"quicdiver/internal/client/tray"
 )
 
@@ -73,6 +74,12 @@ func startRuntime(ctx context.Context, o options, cfg config.Config, quit contex
 	ctl := control.New(control.DialNode(true))
 	ctl.SetNode(cfg.Node.Entries, cfg.Node.Token)
 
+	// Подписка: узлы сети, резервные точки входа и лимиты приезжают от узла
+	// сами. Без неё адрес остаётся тем, что вписали руками, и блокировка
+	// одного адреса выключает всех разом.
+	sub := subscribe.New(ctl, live)
+	go sub.Run(ctx)
+
 	rt := &clientRuntime{
 		svc: service.New(func(sctx context.Context) error { return run(sctx, o) },
 			service.DefaultBackoff()),
@@ -82,7 +89,8 @@ func startRuntime(ctx context.Context, o options, cfg config.Config, quit contex
 
 	h := api.Handler(tok, api.Deps{
 		Service: rt.svc, Control: ctl, Config: live, Notices: notices,
-		Quit: func() { quit() },
+		Subscribe: sub,
+		Quit:      func() { quit() },
 		// Контекст жизни клиента, а не запроса: сессия обязана пережить
 		// ответ панели.
 		Base: ctx,

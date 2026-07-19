@@ -301,4 +301,3 @@ func TestAllocateReusesFreed(t *testing.T) {
 		t.Fatalf("выдан %v, ожидался переиспользованный %v", a2, a1)
 	}
 }
-

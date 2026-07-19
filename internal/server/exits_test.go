@@ -11,8 +11,8 @@ import (
 	"quicdiver/internal/server/db"
 )
 
-// exitsOf — список выходов, как его увидит клиент.
-func exitsOf(t *testing.T, cfg Config) map[string]exitView {
+// exitsFor — список выходов, как его увидит клиент.
+func exitsFor(t *testing.T, cfg Config) map[string]exitView {
 	t.Helper()
 	w := httptest.NewRecorder()
 	serveExits(cfg, http.NotFoundHandler()).ServeHTTP(w, req(http.MethodGet, "/qd-exits", "", auth.RoleUser))
@@ -45,7 +45,7 @@ func TestExitsListsNodesAndAuto(t *testing.T) {
 	})
 	store.TouchNode(ctx, "de.example")
 
-	exits := exitsOf(t, cfg)
+	exits := exitsFor(t, cfg)
 	if _, ok := exits["direct"]; !ok {
 		t.Fatal("нет выхода direct")
 	}
@@ -80,7 +80,7 @@ func TestExitsKeepsDeadNodes(t *testing.T) {
 	cfg, store := usersCfg(t)
 	store.PutNode(context.Background(), db.Node{ID: "dead.example", Enabled: true})
 
-	e, ok := exitsOf(t, cfg)["dead.example"]
+	e, ok := exitsFor(t, cfg)["dead.example"]
 	if !ok {
 		t.Fatal("мёртвый узел исчез из списка")
 	}
@@ -94,7 +94,7 @@ func TestExitsHidesDisabled(t *testing.T) {
 	cfg, store := usersCfg(t)
 	store.PutNode(context.Background(), db.Node{ID: "off.example", Enabled: false})
 
-	if _, ok := exitsOf(t, cfg)["off.example"]; ok {
+	if _, ok := exitsFor(t, cfg)["off.example"]; ok {
 		t.Fatal("выключенный узел предложен клиенту")
 	}
 }

@@ -71,10 +71,13 @@ func listNodes(w http.ResponseWriter, r *http.Request, store *db.SQLite, cfg Con
 	}
 	out := make([]nodeView, 0, len(nodes))
 	for _, n := range nodes {
+		self := n.ID == cfg.NodeID
 		out = append(out, nodeView{
-			Node:  n,
-			Self:  n.ID == cfg.NodeID,
-			Alive: !n.LastSeen.IsZero() && time.Since(n.LastSeen) < nodeAliveAfter,
+			Node: n,
+			Self: self,
+			// Сам себя узел живым видит всегда: он отвечает на этот же запрос.
+			// Иначе панель показывала бы мёртвым узел, который её и обслуживает.
+			Alive: self || (!n.LastSeen.IsZero() && time.Since(n.LastSeen) < nodeAliveAfter),
 		})
 	}
 	writeJSON(w, out)

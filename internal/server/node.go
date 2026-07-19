@@ -101,6 +101,8 @@ type Config struct {
 	// ReplicaPath — путь раздачи снимка базы соседним узлам, обычно "/qd-replica".
 	// Пусто → узел снимок не раздаёт (и мастером быть не может).
 	ReplicaPath string
+	// HeartbeatPath — путь отметок живости соседей, обычно "/qd-beat".
+	HeartbeatPath string
 	// OutboundsPath — путь публикации выходов клиенту (метка+подсеть),
 	// обычно "/qd-outbounds". Доступ авторизованному клиенту, секреты не отдаются.
 	OutboundsPath string
@@ -220,6 +222,12 @@ func Run(ctx context.Context, cfg Config) error {
 	if cfg.ReplicaPath != "" && cfg.Store != nil {
 		mux.Handle(cfg.ReplicaPath, serveReplica(cfg))
 		log.Printf("репликация базы на %s", cfg.ReplicaPath)
+	}
+	// Отметка живости соседей. Отдельно от репликации: снимок ходит раз в
+	// четверть часа, а мёртвым узел считается через три минуты.
+	if cfg.HeartbeatPath != "" && cfg.Store != nil {
+		mux.Handle(cfg.HeartbeatPath, serveHeartbeat(cfg))
+		log.Printf("отметки живости на %s", cfg.HeartbeatPath)
 	}
 	// Кто мастер и смена мастера. Промоушен только вручную: автоматика при
 	// сетевом разделении сама плодит двух мастеров.

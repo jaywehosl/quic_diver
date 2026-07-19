@@ -57,6 +57,8 @@ func main() {
 	masterAddr := flag.String("master", "",
 		"адрес мастер-узла host:port при первой установке (дальше сеть узнаётся сама)")
 	masterSNI := flag.String("master-sni", "", "имя мастера для TLS/:authority (пусто → host из -master)")
+	beatEvery := flag.Duration("beat-every", time.Minute,
+		"как часто узел отмечается живым у мастера")
 	replicaEvery := flag.Duration("replica-every", 15*time.Minute,
 		"как часто реплика забирает базу у мастера (0 — не реплицировать)")
 	addUser := flag.Bool("add-user", false, "сгенерировать клиентский токен, записать в БД и выйти (нужен -db)")
@@ -180,6 +182,7 @@ func main() {
 		AdminNodesPath:     "/qd-admin/nodes",
 		AdminClusterPath:   "/qd-admin/cluster",
 		ReplicaPath:        server.ReplicaPath,
+		HeartbeatPath:      server.HeartbeatPath,
 		OutboundsPath:      "/qd-outbounds",
 		Store:              storeOrNil(live),
 		Pool:               poolFor(store, *poolCIDR),
@@ -259,6 +262,12 @@ func main() {
 			go rep.Run(ctx)
 			log.Printf("репликация базы: раз в %s", *replicaEvery)
 		}
+		// Отметки живости. Идут своим темпом: узел, о котором не слышно три
+		// минуты, считается мёртвым, а снимок ходит куда реже.
+		go (&server.Beater{
+			Live: live, SelfID: cfg.NodeID, SelfToken: *nodeToken,
+			RT: nodeRoundTripper(ctx), Every: *beatEvery,
+		}).Run(ctx)
 	}
 
 	log.Printf("узел на %s (authority=%s, назначаю клиенту %s)", *listen, *authority, *assign)

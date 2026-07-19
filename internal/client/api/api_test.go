@@ -13,6 +13,7 @@ import (
 
 	"quicdiver/internal/client/config"
 	"quicdiver/internal/client/control"
+	"quicdiver/internal/client/notify"
 	"quicdiver/internal/client/service"
 	"quicdiver/internal/server/auth"
 )
@@ -412,5 +413,73 @@ func TestWrongMethodRejected(t *testing.T) {
 	}
 	if w := call(t, h, http.MethodPost, "/api/status", "{}"); w.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status по POST: статус %d", w.Code)
+	}
+}
+
+// --- уведомления ---
+
+// Панель показывает уведомления и счётчик непрочитанных: по счётчику трей
+// красит иконку, и разбирать ради него весь список он не должен.
+func TestNotificationsListed(t *testing.T) {
+	d, _, _, _ := deps(t)
+	c := notify.New()
+	c.Post(notify.Warn, "узел недоступен", "de.example")
+	c.Post(notify.Info, "узел сменился", "")
+	d.Notices = c
+
+	w := call(t, Handler(testToken, d, nil), http.MethodGet, "/api/notifications", "")
+	var v noticesView
+	if err := json.Unmarshal(w.Body.Bytes(), &v); err != nil {
+		t.Fatal(err)
+	}
+	if v.Unread != 2 || len(v.Items) != 2 {
+		t.Fatalf("уведомления: %+v", v)
+	}
+	if v.Items[0].Title != "узел сменился" {
+		t.Fatalf("порядок не от свежих: %+v", v.Items)
+	}
+}
+
+// Прочитанное перестаёт красить иконку.
+func TestNotificationsMarkedRead(t *testing.T) {
+	d, _, _, _ := deps(t)
+	c := notify.New()
+	c.Post(notify.Warn, "первое", "")
+	c.Post(notify.Warn, "второе", "")
+	d.Notices = c
+	h := Handler(testToken, d, nil)
+
+	w := call(t, h, http.MethodPost, "/api/notifications", `{"id":0}`)
+	var v noticesView
+	json.Unmarshal(w.Body.Bytes(), &v)
+	if v.Unread != 0 {
+		t.Fatalf("после отметки всех непрочитанных: %d", v.Unread)
+	}
+	if len(v.Items) != 2 {
+		t.Fatal("отметка прочитанным не должна удалять уведомления")
+	}
+}
+
+// Очистка убирает список целиком.
+func TestNotificationsCleared(t *testing.T) {
+	d, _, _, _ := deps(t)
+	c := notify.New()
+	c.Post(notify.Error, "нет связи", "")
+	d.Notices = c
+
+	w := call(t, Handler(testToken, d, nil), http.MethodPost, "/api/notifications", `{"clear":true}`)
+	var v noticesView
+	json.Unmarshal(w.Body.Bytes(), &v)
+	if len(v.Items) != 0 || v.Unread != 0 {
+		t.Fatalf("очистка не сработала: %+v", v)
+	}
+}
+
+// Панель без подключённых уведомлений не падает: список просто пуст.
+func TestNotificationsAbsentIsEmpty(t *testing.T) {
+	d, _, _, _ := deps(t)
+	w := call(t, Handler(testToken, d, nil), http.MethodGet, "/api/notifications", "")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"items":[]`) {
+		t.Fatalf("статус %d: %s", w.Code, w.Body)
 	}
 }

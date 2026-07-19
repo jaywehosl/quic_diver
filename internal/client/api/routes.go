@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"quicdiver/internal/client/config"
+	"quicdiver/internal/client/notify"
 	"quicdiver/internal/client/routing"
 	"quicdiver/internal/server/auth"
 )
@@ -234,4 +235,50 @@ func (d Deps) nodeAuthority() string {
 		return "node.invalid"
 	}
 	return cfg.Node.Entries[0].Authority()
+}
+
+// --- уведомления ---
+
+// noticesView — уведомления и счётчик непрочитанных.
+//
+// Счётчик отдельно от списка: трей рисует иконку по нему и не должен разбирать
+// весь список ради одного числа.
+type noticesView struct {
+	Unread int            `json:"unread"`
+	Items  []notify.Event `json:"items"`
+}
+
+func (d Deps) listNotices(w http.ResponseWriter, r *http.Request) {
+	if d.Notices == nil {
+		writeJSON(w, noticesView{Items: []notify.Event{}})
+		return
+	}
+	items := d.Notices.List()
+	if items == nil {
+		items = []notify.Event{}
+	}
+	writeJSON(w, noticesView{Unread: d.Notices.Unread(), Items: items})
+}
+
+// readNotices помечает прочитанным одно уведомление или все, либо очищает список.
+type readRequest struct {
+	// ID — что пометить прочитанным; 0 — все.
+	ID int64 `json:"id"`
+	// Clear — убрать список целиком.
+	Clear bool `json:"clear"`
+}
+
+func (d Deps) readNotices(w http.ResponseWriter, r *http.Request) {
+	if d.Notices == nil {
+		fail(w, http.StatusNotImplemented, errors.New("уведомления не подключены"))
+		return
+	}
+	var req readRequest
+	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req)
+	if req.Clear {
+		d.Notices.Clear()
+	} else {
+		d.Notices.MarkRead(req.ID)
+	}
+	d.listNotices(w, r)
 }

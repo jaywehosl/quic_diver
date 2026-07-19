@@ -8,6 +8,7 @@ import (
 
 	"quicdiver/internal/client/config"
 	"quicdiver/internal/client/control"
+	"quicdiver/internal/client/notify"
 	"quicdiver/internal/client/service"
 )
 
@@ -22,6 +23,8 @@ type Deps struct {
 	Config ConfigStore
 	// Quit гасит клиента целиком (пункт «Выйти» в трее).
 	Quit func()
+	// Notices — уведомления: то, о чём пользователь обязан узнать сам.
+	Notices Notices
 }
 
 // Sessioner — часть service.Service, нужная панели.
@@ -36,6 +39,14 @@ type Controller interface {
 	Do(ctx context.Context, req *http.Request) (*http.Response, error)
 	Status() control.Status
 	SetNode(entries []config.Entry, token string)
+}
+
+// Notices — центр уведомлений, нужный панели.
+type Notices interface {
+	List() []notify.Event
+	Unread() int
+	MarkRead(id int64)
+	Clear()
 }
 
 // ConfigStore — чтение и запись настроек клиента.
@@ -55,6 +66,7 @@ func Handler(tok Token, d Deps, ui http.Handler) http.Handler {
 	mux.Handle("/api/config", rw(d.getConfig, d.putConfig))
 	mux.Handle("/api/rules/test", post(d.testRule))
 	mux.Handle("/api/exits", get(d.exits))
+	mux.Handle("/api/notifications", rw(d.listNotices, d.readNotices))
 	// Всё под /api/node/ уходит на узел как есть: admin-API уже собран, и
 	// дублировать здесь каждый его эндпоинт значило бы обновлять два места.
 	mux.Handle("/api/node/", http.HandlerFunc(d.proxy))

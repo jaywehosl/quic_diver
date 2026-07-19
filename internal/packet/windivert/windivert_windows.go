@@ -48,9 +48,9 @@ const (
 
 // Константы драйвера.
 const (
-	BatchMax = 0xFF          // макс. пакетов за один RecvEx/SendEx (arch6)
-	MTUMax   = 40 + 0xFFFF   // макс. размер одного пакета
-	addrSize = 80            // sizeof(WINDIVERT_ADDRESS)
+	BatchMax = 0xFF        // макс. пакетов за один RecvEx/SendEx (arch6)
+	MTUMax   = 40 + 0xFFFF // макс. размер одного пакета
+	addrSize = 80          // sizeof(WINDIVERT_ADDRESS)
 )
 
 // Address — Go-зеркало WINDIVERT_ADDRESS (80 байт). Битовые поля в word разбираем
@@ -68,9 +68,9 @@ func init() {
 	}
 }
 
-func (a *Address) Layer() Layer  { return Layer(a.word & 0xFF) }
-func (a *Address) Event() uint8  { return uint8((a.word >> 8) & 0xFF) }
-func (a *Address) Sniffed() bool { return a.word&(1<<16) != 0 }
+func (a *Address) Layer() Layer   { return Layer(a.word & 0xFF) }
+func (a *Address) Event() uint8   { return uint8((a.word >> 8) & 0xFF) }
+func (a *Address) Sniffed() bool  { return a.word&(1<<16) != 0 }
 func (a *Address) Outbound() bool { return a.word&(1<<17) != 0 }
 func (a *Address) Loopback() bool { return a.word&(1<<18) != 0 }
 func (a *Address) Impostor() bool { return a.word&(1<<19) != 0 }

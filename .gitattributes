@@ -1,0 +1,23 @@
+# Бинарные файлы git не должен трогать НИКОГДА.
+#
+# Без этой пометки он считает их текстом: конвертирует переводы строк, а
+# инструменты вроде sed при массовой обработке съедают по байту. Ровно так и
+# случилось при чистке истории — вшитые WinDivert.dll и .sys потеряли по
+# последнему байту, и клиент перестал грузить драйвер с сообщением
+# «%1 is not a valid Win32 application», которое на права администратора не
+# указывает вовсе.
+*.dll binary
+*.sys binary
+*.exe binary
+*.db  binary
+*.png binary
+*.ico binary
+
+# Исходники храним с LF: рабочее дерево на Windows получает CRLF само.
+*.go   text eol=lf
+*.md   text eol=lf
+*.sh   text eol=lf
+*.html text eol=lf
+*.css  text eol=lf
+*.js   text eol=lf
+*.json text eol=lf

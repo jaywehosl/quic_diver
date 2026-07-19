@@ -184,3 +184,21 @@ label.check input { width: auto; }
 #help pre code { background: none; padding: 0; }
 
 .subtabs { border-bottom: 1px solid var(--line); padding-bottom: 10px; }
+
+/* --- первый запуск --- */
+
+/* Пока клиент не настроен, интерфейс показывать нечем: все экраны опираются на
+   узел, которого нет. Отсюда полноэкранный блок с единственным действием. */
+.setup {
+  position: fixed; inset: 0; z-index: 10;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg); padding: 24px;
+}
+
+.setup-box { width: 100%; max-width: 460px; }
+.setup-box h1 { font-size: 22px; margin: 0 0 6px; letter-spacing: .3px; }
+.setup-box p { color: var(--muted); margin: 0 0 14px; }
+.setup-box input { font-family: var(--mono); margin-bottom: 10px; }
+.setup-box button { width: 100%; padding: 9px; }
+.setup-box .msg { margin-top: 10px; min-height: 20px; }
+.setup-box .hint { margin-top: 16px; font-size: 13px; }

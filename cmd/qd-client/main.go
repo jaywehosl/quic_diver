@@ -41,16 +41,19 @@ type options struct {
 	routeDef    string // выход по умолчанию (нет совпадений правил)
 }
 
-// Встроенные параметры для «боевой» сборки: задаются линковщиком
+// Встроенные параметры сборки: задаются линковщиком
 //
-//	-ldflags "-X main.builtinServer=host:port -X main.builtinToken=qd_..."
+//	-ldflags "-X main.builtinServer=host:port -X main.builtinBrutal=700"
 //
-// Тогда .exe запускается двойным кликом без флагов и сам идёт на нужный узел.
+// ТОКЕН СЮДА НЕ ВШИВАЕТСЯ. Раньше вшивался, и это было неверно: один и тот же
+// файл получали все, а значит все ходили под одним доступом — отозвать его у
+// одного человека было нельзя, не сломав остальным. Доступ выдаётся ссылкой
+// подписки, которую человек вставляет в панель; сборка остаётся общей.
+//
 // Пустые (обычная dev-сборка) — работают штатные флаги и дефолты.
 var (
 	builtinServer    string
 	builtinAuthority string
-	builtinToken     string
 	builtinBrutal    string // congestion Мбит/с для боевой сборки (upload)
 )
 
@@ -83,7 +86,7 @@ func main() {
 	flag.BoolVar(&o.noProxy, "no-proxy", !cfg.Capture.ManageProxy, "не отключать системный прокси")
 	flag.BoolVar(&o.noDNS, "no-dns", !cfg.Capture.ManageDNS, "не поднимать локальный резолвер (резолв пойдёт мимо туннеля — провайдер подменит ответы)")
 	flag.StringVar(&o.nat46, "nat46", cfg.Capture.NAT46, "давать IPv6-only хостам фиктивный IPv4: auto (только если своего IPv6 нет), on, off")
-	flag.StringVar(&o.token, "token", firstNonEmpty(builtinToken, cfg.Node.Token), "токен доступа к узлу (пусто → узел без БД, dev)")
+	flag.StringVar(&o.token, "token", cfg.Node.Token, "токен доступа (обычно приезжает ссылкой подписки; флаг — для отладки)")
 	flag.BoolVar(&o.hybrid, "hybrid", cfg.Transport.Hybrid, "TCP через надёжный CONNECT-стрим, UDP датаграммами (false → всё датаграммами, модель B)")
 	flag.IntVar(&o.recvWorkers, "recv-workers", cfg.Transport.RecvWorkers, "потоков захвата: 1 сохраняет порядок пакетов; >1 ускоряет скачивание ценой reordering")
 	flag.IntVar(&o.mtu, "mtu", cfg.Transport.MTU, "MTU локального стека; инжект идёт в интерфейс (у него обычно 1500), а не в PPPoE-путь")
@@ -105,10 +108,6 @@ func main() {
 		if v, err := strconv.Atoi(builtinBrutal); err == nil {
 			o.brutalMbps = v
 		}
-	}
-
-	if o.server != "" && o.token != "" {
-		log.Printf("боевой режим: узел %s (токен вшит)", o.server)
 	}
 
 	log.SetPrefix("qd-client: ")

@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 
@@ -114,8 +115,12 @@ func main() {
 	flag.Parse()
 
 	cfg := config.Default()
-	cfg.Node.Entries = []config.Entry{{Addr: "203.0.113.10:443", SNI: "node.example"}}
-	cfg.Node.Token = "qd_демонстрационный"
+	// Ненастроенный клиент — чтобы увидеть экран первого запуска. Ссылку ниже
+	// можно вставить в него и проверить переход в основной интерфейс.
+	if os.Getenv("QD_CONFIGURED") != "" {
+		cfg.Node.Entries = []config.Entry{{Addr: "203.0.113.10:443", SNI: "node.example"}}
+		cfg.Node.Token = "qd_демонстрационный"
+	}
 	cfg.Routing.Rules = []string{
 		"# банк мимо туннеля",
 		"dom:bank.example = direct",

@@ -8,6 +8,23 @@
 </head>
 <body>
 
+<!-- ПЕРВЫЙ ЗАПУСК: пока клиент не настроен, показывать интерфейс нечем и
+     незачем — все экраны опираются на узел, которого нет. Одно поле и одно
+     действие: вставить ссылку. -->
+<div id="setup" class="setup" hidden>
+  <div class="setup-box">
+    <h1>QUIC&nbsp;Diver</h1>
+    <p>Вставьте ссылку подключения — её выдаёт администратор сети.</p>
+    <input id="setupLink" placeholder="qd://…" autocomplete="off" spellcheck="false">
+    <button id="setupApply" class="primary">Подключить сеть</button>
+    <div id="setupMsg" class="msg"></div>
+    <p class="hint">
+      Ссылка содержит адрес узла и ваш токен. Остальное — список узлов, резервные
+      точки входа, лимиты — клиент получит от сети сам.
+    </p>
+  </div>
+</div>
+
 <header class="top">
   <div class="brand">QUIC&nbsp;Diver</div>
 

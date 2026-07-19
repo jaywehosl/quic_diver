@@ -71,6 +71,10 @@ async function refreshStatus() {
 }
 
 function renderStatus(st) {
+  // Ненастроенный клиент показывает только экран настройки: остальное
+  // опирается на узел, которого ещё нет.
+  showSetup(!st.configured);
+
   const dot = $('dot');
   const text = $('stateText');
   const unread = Number($('unread').dataset.count || 0);
@@ -455,3 +459,38 @@ async function loadSub(refresh) {
 }
 
 $('btnRefreshSub').onclick = () => loadSub(true);
+
+// --- первый запуск ---
+
+// Пока клиент не настроен, интерфейс не показываем: каждый его экран опирается
+// на узел, которого нет, и человек оказался бы перед пустыми таблицами вместо
+// единственного нужного ему действия.
+function showSetup(on) {
+  $('setup').hidden = !on;
+  document.querySelector('.top').hidden = on;
+  document.getElementById('tabs').hidden = on;
+  document.querySelector('main').hidden = on;
+  if (on) $('setupLink').focus();
+}
+
+async function applySetupLink() {
+  const link = $('setupLink').value.trim();
+  if (!link) return;
+  $('setupApply').disabled = true;
+  try {
+    const res = await api('/api/bundle', { body: { link } });
+    say($('setupMsg'), res.name ? `подключено: ${res.name}` : 'настройки приняты', 'ok');
+    await loadConfig();
+    await refreshStatus();
+    showSetup(false);
+    loadExits();
+    loadSub(true);
+  } catch (e) {
+    say($('setupMsg'), e.message, 'err');
+  } finally {
+    $('setupApply').disabled = false;
+  }
+}
+
+$('setupApply').onclick = applySetupLink;
+$('setupLink').addEventListener('keydown', (e) => { if (e.key === 'Enter') applySetupLink(); });

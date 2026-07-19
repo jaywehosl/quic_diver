@@ -178,13 +178,23 @@ func (e *Engine) pumpOutboundReader(ctx context.Context, rd packet.Reader, src p
 				reinject = append(reinject, *p)
 				continue
 			}
+			// TCP и UDP терминируются локальным стеком и уезжают своими стримами
+			// (CONNECT для TCP, CONNECT-UDP для UDP): метка маршрута едет
+			// заголовком, одинаково для обоих. Раньше UDP шёл сырым пакетом в
+			// датаграмме, а метка жила в src-адресе — это упиралось в нарезку
+			// пула и рвало флоу при каждом изменении набора выходов.
 			if isTCP(p.Data) {
 				e.cTCP.Add(1)
-				tt.push(p.Data) // локальный стек терминирует и уедет CONNECT-стримом
+				tt.push(p.Data)
 				continue
 			}
-			// UDP и прочее — датаграммой, как в модели B.
-			e.cUDP.Add(1)
+			if isUDP(p.Data) {
+				e.cUDP.Add(1)
+				tt.push(p.Data)
+				continue
+			}
+			// Прочие протоколы (ICMP и т.п.) — по-прежнему датаграммой: их
+			// терминировать нечем, они едут сырыми пакетами модели B.
 			if e.rewriter != nil {
 				e.rewriter.Outbound(p.Data)
 			}
@@ -412,6 +422,21 @@ func isTCP(pkt []byte) bool {
 		return len(pkt) >= 20 && pkt[9] == 6
 	case 6:
 		return len(pkt) >= 40 && pkt[6] == 6
+	}
+	return false
+}
+
+// isUDP — протокол 17. Расширение-заголовки IPv6 не разбираем: у обычного
+// трафика их нет, а ошибиться безопасно — пакет просто уедет датаграммой.
+func isUDP(pkt []byte) bool {
+	if len(pkt) < 1 {
+		return false
+	}
+	switch pkt[0] >> 4 {
+	case 4:
+		return len(pkt) >= 20 && pkt[9] == 17
+	case 6:
+		return len(pkt) >= 40 && pkt[6] == 17
 	}
 	return false
 }

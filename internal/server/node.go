@@ -134,6 +134,11 @@ func Run(ctx context.Context, cfg Config) error {
 	mux := http.NewServeMux()
 	mux.Handle("/", site) // всё прочее — витрина (та же, что на TCP: лимит общий)
 
+	// UDP-флоу клиента (RFC 9298). Префиксом, а не точным путём: целевой адрес
+	// лежит в самом пути. Метка маршрута едет тем же заголовком, что у TCP —
+	// одна модель маршрутизации на оба протокола.
+	mux.Handle(ConnectUDPPrefix, serveConnectUDP(cfg))
+
 	// DoH (RFC 8484) в том же HTTP/3-соединении, что и туннель: DNS клиента едет
 	// внутри QUIC, провайдеру его не видно и подменить нечего.
 	if cfg.Resolver != nil && cfg.DNSPath != "" {

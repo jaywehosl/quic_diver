@@ -16,6 +16,7 @@ import (
 
 	"quicdiver/internal/client/connectdial"
 	"quicdiver/internal/client/routing"
+	"quicdiver/internal/transport/connectudp"
 )
 
 // FakeResolver отдаёт домен и реальный адрес по фиктивному (fakeip.Pool). Домен
@@ -36,6 +37,9 @@ type Dialer struct {
 	Fake FakeResolver
 	// Default — метка выхода по умолчанию; пустая и "direct" в Qd-Route не кладутся.
 	Default string
+	// Authority — имя узла для :authority в CONNECT-UDP (RFC 9298 кладёт цель в
+	// путь, поэтому authority нужен отдельно).
+	Authority string
 }
 
 // DialTCP классифицирует флоу и открывает CONNECT-стрим на реальный адрес с
@@ -51,9 +55,21 @@ func (d Dialer) DialTCP(ctx context.Context, dst netip.AddrPort) (net.Conn, erro
 	return connectdial.Dialer{CC: d.CC, Header: hdr}.DialTCP(ctx, real)
 }
 
-// DialUDP не поддержан здесь: UDP идёт датаграммами (метка = src-адрес).
+// DialUDP открывает UDP-флоу тем же порядком, что и TCP: классифицирует,
+// подменяет fake→real и метит выход.
+//
+// Метка едет заголовком, а не src-адресом, как было у датаграмм. Поэтому
+// правила, транзит и балансировка работают для UDP ровно так же, как для TCP, а
+// смена выхода ничего не стоит адресации клиента.
 func (d Dialer) DialUDP(ctx context.Context, dst netip.AddrPort) (net.Conn, error) {
-	return connectdial.Dialer{CC: d.CC}.DialUDP(ctx, dst)
+	real, domain := d.resolve(dst)
+	label := d.classify(real, domain)
+
+	var hdr http.Header
+	if label != "" && label != "direct" {
+		hdr = http.Header{routing.RouteHeaderName: []string{label}}
+	}
+	return connectudp.Dialer{CC: d.CC, Authority: d.Authority, Header: hdr}.Dial(ctx, real)
 }
 
 // resolve превращает fake-адрес в реальный и достаёт домен. Не-fake dst проходит

@@ -25,6 +25,7 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	"github.com/yosida95/uritemplate/v3"
 
+	"quicdiver/internal/client/hwid"
 	"quicdiver/internal/server/auth"
 	"quicdiver/internal/uplink/quicconn"
 )
@@ -96,6 +97,12 @@ func authorize(ctx context.Context, cc *http3.ClientConn, token, authURL string)
 		return err
 	}
 	req.Header.Set(auth.HeaderToken, token)
+	// Отпечаток машины — для учёта устройств на узле. Едет внутри
+	// зашифрованного H3-запроса, снаружи не виден. Пустой (систему не опознали)
+	// просто не отправляем: узел тогда учёт по устройствам не ведёт.
+	if id := hwid.Get(); id != "" {
+		req.Header.Set(auth.HeaderHWID, id)
+	}
 	rsp, err := cc.RoundTrip(req)
 	if err != nil {
 		return fmt.Errorf("авторизация: %w", err)

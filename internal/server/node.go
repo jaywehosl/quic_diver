@@ -209,6 +209,9 @@ func Run(ctx context.Context, cfg Config) error {
 				site.ServeHTTP(w, r)
 				return
 			}
+			// Отпечаток машины клиент шлёт именно здесь; туннель поднимается
+			// следующим запросом, где заголовка уже не будет — запоминаем.
+			sess.SetHWID(hwidFrom(r))
 			w.WriteHeader(http.StatusNoContent)
 		})
 	}
@@ -234,7 +237,10 @@ func Run(ctx context.Context, cfg Config) error {
 		if err != nil {
 			return
 		}
-		go serveTunnel(ctx, conn, cfg, assign, router)
+		// Учёт заводим здесь: тут ещё виден запрос (адрес клиента, отпечаток
+		// машины), а в serveTunnel остаётся только сам туннель.
+		acct := beginSession(r.Context(), cfg, sessionHash(r.Context()), sessionHWID(r.Context()), remoteIPFrom(r))
+		go serveTunnel(ctx, conn, cfg, assign, router, acct)
 	})
 
 	// Обычный CONNECT (RFC 9114) — надёжный stream для TCP-флоу гибрида: ретрансмит
@@ -488,7 +494,7 @@ func (fw flushWriter) Write(p []byte) (int, error) {
 // serveTunnel назначает клиенту адрес(а)/маршруты и запускает forwarder. assign —
 // адреса именно этого клиента (по одному на выход при роутинге). router выбирает
 // выход по src-адресу пакета.
-func serveTunnel(ctx context.Context, conn *connectip.Conn, cfg Config, assign []netip.Prefix, router netstack.Router) {
+func serveTunnel(ctx context.Context, conn *connectip.Conn, cfg Config, assign []netip.Prefix, router netstack.Router, acct *accountant) {
 	if err := conn.AssignAddresses(ctx, assign); err != nil {
 		conn.Close()
 		return
@@ -502,5 +508,13 @@ func serveTunnel(ctx context.Context, conn *connectip.Conn, cfg Config, assign [
 		conn.Close()
 		return
 	}
-	_ = ns.Run(ctx, conn) // до закрытия туннеля
+
+	// Туннель считаем сквозь обёртку, а учёт живёт ровно столько же, сколько
+	// сессия: свой контекст гасим при выходе, и запись снимается с учёта.
+	tun := &countingTunnel{inner: conn}
+	tctx, stop := context.WithCancel(ctx)
+	defer stop()
+	go acct.run(tctx, tun.totals)
+
+	_ = ns.Run(ctx, tun) // до закрытия туннеля
 }

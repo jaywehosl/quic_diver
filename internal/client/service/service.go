@@ -14,6 +14,7 @@ package service
 import (
 	"context"
 	"errors"
+	"log"
 	"sync"
 	"time"
 )
@@ -163,6 +164,10 @@ func (s *Service) loop(ctx context.Context, done chan struct{}) {
 		if err == nil {
 			return // сессия завершилась сама и без ошибки
 		}
+		// Причину видно вслух. Без этого цикл переподключения крутится молча:
+		// в журнале одни и те же строки подъёма, а почему сессия умирает —
+		// нигде. Наступали на это вживую.
+		log.Printf("сессия оборвалась (прожила %s): %v", lived.Round(time.Millisecond), err)
 		// Долго прожившая сессия — обрыв разовый, начинаем паузы заново.
 		if lived >= s.backoff.Stable {
 			pause = s.backoff.Min

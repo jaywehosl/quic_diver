@@ -319,6 +319,8 @@ func (t *Tray) Notify(level, title, text string) {
 // Обязан идти в той же нити ОС, где создано окно, — отсюда LockOSThread у
 // вызывающего.
 func (t *Tray) Run() {
+	defer t.cleanup()
+
 	var m msg
 	for {
 		ret, _, _ := procGetMessage.Call(uintptr(unsafe.Pointer(&m)), 0, 0, 0)
@@ -330,11 +332,34 @@ func (t *Tray) Run() {
 	}
 }
 
-// Close убирает значок.
+// Close убирает значок и останавливает цикл сообщений.
 //
-// Обязательно: без явного удаления значок остаётся висеть в лотке призраком до
-// того, как пользователь наведёт на него мышь.
+// Вызывается ИЗ ЛЮБОЙ нити, поэтому окно закрывается сообщением, а не прямым
+// DestroyWindow: Windows выполняет уничтожение только в той нити, что окно
+// создала, — из чужой вызов молча ничего не делает. Цикл сообщений тогда висит
+// вечно, и процесс не завершается после «Выйти». Наступали на это вживую.
 func (t *Tray) Close() {
+	t.mu.Lock()
+	hwnd, added := t.hwnd, t.added
+	t.mu.Unlock()
+
+	// Значок снимаем сразу: иначе он остаётся в лотке призраком до наведения
+	// мыши. Эта операция нити не требует.
+	if added {
+		t.mu.Lock()
+		t.added = false
+		t.mu.Unlock()
+		data := t.baseData()
+		procShellNotifyIcon.Call(nimDelete, uintptr(unsafe.Pointer(data)))
+	}
+	if hwnd != 0 {
+		procPostMessage.Call(uintptr(hwnd), wmClose, 0, 0)
+	}
+}
+
+// cleanup освобождает то, что можно трогать только из нити окна. Вызывается
+// самим циклом сообщений на выходе.
+func (t *Tray) cleanup() {
 	t.mu.Lock()
 	added := t.added
 	t.added = false
@@ -348,9 +373,6 @@ func (t *Tray) Close() {
 	}
 	for _, h := range icons {
 		procDestroyIcon.Call(uintptr(h))
-	}
-	if t.hwnd != 0 {
-		procDestroyWindow.Call(uintptr(t.hwnd))
 	}
 }
 

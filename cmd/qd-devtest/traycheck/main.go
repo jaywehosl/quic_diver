@@ -1,6 +1,6 @@
 //go:build windows
 
-// Проверка значка в лотке: цвета, меню, уведомления. Ничего не перехватывает.
+// Проверка значка: цвета, меню, выход. Ничего не перехватывает.
 package main
 
 import (
@@ -12,9 +12,10 @@ import (
 )
 
 func main() {
-	runtime.LockOSThread() // окно и цикл сообщений обязаны жить в одной нити ОС
+	runtime.LockOSThread()
 
 	done := make(chan struct{})
+	var t *tray.Tray
 	t, err := tray.New(tray.Actions{
 		Connect:    func() { log.Print("МЕНЮ: подключиться") },
 		Disconnect: func() { log.Print("МЕНЮ: отключиться") },
@@ -24,30 +25,18 @@ func main() {
 	if err != nil {
 		log.Fatalf("значок: %v", err)
 	}
-	defer t.Close()
 
+	// Гасим значок ИЗ ДРУГОЙ горутины — ровно так это делает клиент. Раньше
+	// цикл сообщений на этом висел вечно, и процесс не завершался.
 	go func() {
-		states := []struct {
-			s    tray.State
-			note string
-		}{
-			{tray.State{Session: tray.Stopped}, "серый — отключено"},
-			{tray.State{Session: tray.Connected}, "зелёный — работает"},
-			{tray.State{Session: tray.Connecting}, "красный — связи нет"},
-			{tray.State{Session: tray.Connected, Unread: 2}, "синий — есть уведомления"},
+		select {
+		case <-done:
+		case <-time.After(8 * time.Second):
+			log.Print("время вышло — гашу значок из чужой горутины")
 		}
-		for _, st := range states {
-			log.Printf("значок: %s", st.note)
-			t.SetState(st.s)
-			time.Sleep(3 * time.Second)
-		}
-		t.Notify("warn", "QUIC Diver", "проверка уведомления")
-		log.Print("уведомление отправлено; правый клик — меню, выход — пункт «Выйти»")
-		time.Sleep(20 * time.Second)
-		close(done)
+		t.Close()
 	}()
 
-	go func() { <-done; t.Close() }()
 	t.Run()
-	log.Print("значок закрыт")
+	log.Print("цикл сообщений завершён — процесс выходит")
 }

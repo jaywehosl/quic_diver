@@ -202,3 +202,7 @@ label.check input { width: auto; }
 .setup-box button { width: 100%; padding: 9px; }
 .setup-box .msg { margin-top: 10px; min-height: 20px; }
 .setup-box .hint { margin-top: 16px; font-size: 13px; }
+
+/* Версия сборки в шапке: маленькая, но всегда на виду. «Поправил, пересобрал,
+   а поведение прежнее» почти всегда означает запущенный другой файл. */
+.ver { color: var(--muted); font-size: 12px; font-family: var(--mono); white-space: nowrap; }

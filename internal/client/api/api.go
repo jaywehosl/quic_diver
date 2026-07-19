@@ -118,6 +118,9 @@ type statusView struct {
 	// Configured — задан ли узел и токен. На первом запуске нет, и панель
 	// должна вести к настройке, а не показывать пустой экран с ошибкой.
 	Configured bool `json:"configured"`
+	// Version — чем собран клиент. Видна в панели: «поправил, пересобрал, а
+	// поведение прежнее» почти всегда означает запущенный другой файл.
+	Version version `json:"version"`
 }
 
 func (d Deps) status(w http.ResponseWriter, r *http.Request) {
@@ -128,6 +131,7 @@ func (d Deps) status(w http.ResponseWriter, r *http.Request) {
 		Session: sessionName(st.State), Since: st.Since,
 		Attempts: st.Attempts, Error: st.LastError,
 		Control:    d.Control.Status(),
+		Version:    buildVersion(),
 		Configured: len(cfg.Node.Entries) > 0 && cfg.Node.Token != "",
 	}
 	if len(cfg.Node.Entries) > 0 {

@@ -101,6 +101,13 @@ function renderStatus(st) {
   else if (!st.configured) bits.push('узел не настроен');
   $('stateNode').textContent = bits.join(' · ');
 
+  // Версия сборки: видно, тот ли файл запущен. «Поправил, пересобрал, а
+  // поведение прежнее» почти всегда означает, что запущен другой.
+  const v = st.version || {};
+  $('ver').textContent = v.revision
+    ? v.revision + (v.dirty ? '+' : '') + (v.built ? ' · ' + v.built : '')
+    : '';
+
   const busy = st.session !== 'stopped';
   $('btnConnect').hidden = busy;
   $('btnDisconnect').hidden = !busy;
@@ -465,7 +472,7 @@ async function applySetupLink() {
   $('setupApply').disabled = true;
   try {
     const res = await api('/api/bundle', { body: { link } });
-    say($('setupMsg'), res.name ? `подключено: ${res.name}` : 'настройки приняты', 'ok');
+    say($("setupMsg"), res.name ? `сеть «${res.name}» настроена` : "настройки приняты", "ok");
     await loadConfig();
     await refreshStatus();
     showSetup(false);

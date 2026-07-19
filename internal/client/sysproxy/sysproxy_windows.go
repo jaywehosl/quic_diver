@@ -8,6 +8,8 @@
 package sysproxy
 
 import (
+	"time"
+
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
@@ -15,8 +17,8 @@ import (
 const keyPath = `Software\Microsoft\Windows\CurrentVersion\Internet Settings`
 
 var (
-	wininet          = windows.NewLazyDLL("wininet.dll")
-	procSetOption    = wininet.NewProc("InternetSetOptionW")
+	wininet       = windows.NewLazyDLL("wininet.dll")
+	procSetOption = wininet.NewProc("InternetSetOptionW")
 )
 
 const (
@@ -26,9 +28,25 @@ const (
 
 // notifyChange уведомляет WinINET о смене настроек, чтобы приложения подхватили
 // их без перезапуска.
+//
+// Уведомление повторяется: браузеры перечитывают настройки не мгновенно, а
+// пришедшее в момент собственного старта могут и пропустить. Тогда приложение
+// продолжает ходить через прокси, которого в системе уже нет, — со стороны это
+// выглядит как «клиент подключён, а адрес прежний». Повтор стоит трёх вызовов
+// и снимает большую часть таких случаев.
+//
+// Чего он не лечит: уже открытые соединения. Держащий keep-alive к прокси
+// браузер доживёт на нём до закрытия вкладки, сколько его ни уведомляй.
 func notifyChange() {
-	procSetOption.Call(0, internetOptionSettingsChanged, 0, 0)
-	procSetOption.Call(0, internetOptionRefresh, 0, 0)
+	go func() {
+		for _, pause := range []time.Duration{0, 300 * time.Millisecond, time.Second} {
+			if pause > 0 {
+				time.Sleep(pause)
+			}
+			procSetOption.Call(0, internetOptionSettingsChanged, 0, 0)
+			procSetOption.Call(0, internetOptionRefresh, 0, 0)
+		}
+	}()
 }
 
 // Saved — сохранённое состояние прокси для восстановления.

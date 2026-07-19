@@ -230,3 +230,25 @@ func sessionOf(s service.State) tray.Session {
 		return tray.Stopped
 	}
 }
+
+// waitConnected ждёт, пока сессия установится (или истечёт срок).
+//
+// Нужен перед открытием браузера: сессия снимает системный прокси уже после
+// того, как Connect вернулся, а браузер, запущенный в этот промежуток,
+// запоминает прокси и держится за него до перезапуска.
+func (rt *clientRuntime) waitConnected(ctx context.Context, limit time.Duration) {
+	deadline := time.Now().Add(limit)
+	for time.Now().Before(deadline) {
+		if rt.svc.Status().State == service.StateConnected {
+			// Состояние меняется до того, как сессия успевает снять прокси и
+			// разослать уведомление, — даём ей это доделать.
+			time.Sleep(700 * time.Millisecond)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}

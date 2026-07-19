@@ -206,3 +206,11 @@ label.check input { width: auto; }
 /* Версия сборки в шапке: маленькая, но всегда на виду. «Поправил, пересобрал,
    а поведение прежнее» почти всегда означает запущенный другой файл. */
 .ver { color: var(--muted); font-size: 12px; font-family: var(--mono); white-space: nowrap; }
+
+/* Сбой скрипта виден сразу: иначе экран «просто не реагирует», и причину
+   приходится выяснять через F12 — куда доходит не каждый. */
+.script-err {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
+  background: var(--err); color: #fff;
+  padding: 8px 14px; font-size: 13px; font-family: var(--mono);
+}

@@ -472,10 +472,21 @@ async function applySetupLink() {
   $('setupApply').disabled = true;
   try {
     const res = await api('/api/bundle', { body: { link } });
-    say($("setupMsg"), res.name ? `сеть «${res.name}» настроена` : "настройки приняты", "ok");
-    await loadConfig();
-    await refreshStatus();
+    say($('setupMsg'), res.name ? `сеть «${res.name}» настроена` : 'настройки приняты', 'ok');
+
+    // Открываем интерфейс СРАЗУ, до подгрузки данных.
+    //
+    // Настройки уже сохранены — держать человека на экране настройки после
+    // этого не за что. Если бы переход стоял в конце, любая заминка следующим
+    // шагом (медленный узел, споткнувшийся обработчик) оставляла бы его на том
+    // же экране с зелёной надписью «настроено» — и выглядело бы это как
+    // «нажал, написало «готово», и ничего не произошло».
     showSetup(false);
+
+    // Остальное подтягиваем уже в открытом интерфейсе; ошибки здесь не должны
+    // возвращать человека к вводу ссылки.
+    loadConfig().catch(() => {});
+    refreshStatus().catch(() => {});
     loadExits();
     loadSub(true);
   } catch (e) {
@@ -644,4 +655,21 @@ async function userAction(act, hash, label) {
       adminView('users');
     } catch (e) { alert('Не сохранилось: ' + e.message); }
   }
+}
+
+// Ошибка в скрипте не должна оставлять человека перед экраном, который «просто
+// не реагирует». Без этого разбор упирается в просьбу открыть F12 — а до неё
+// доходит не каждый, и половина случаев остаётся невыясненной.
+window.addEventListener('error', (e) => showScriptError(e.message));
+window.addEventListener('unhandledrejection', (e) => showScriptError(String(e.reason)));
+
+function showScriptError(text) {
+  let box = document.getElementById('scriptErr');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'scriptErr';
+    box.className = 'script-err';
+    document.body.appendChild(box);
+  }
+  box.textContent = 'Сбой в панели: ' + text;
 }

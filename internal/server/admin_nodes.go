@@ -28,7 +28,7 @@ func adminNodes(cfg Config) http.Handler {
 			decoy.Handler().ServeHTTP(w, r)
 			return
 		}
-		store, ok := cfg.Store.(*db.SQLite)
+		store, ok := sqliteOf(cfg.Store)
 		if !ok {
 			http.Error(w, "хранилище не поддерживает реестр узлов", http.StatusNotImplemented)
 			return

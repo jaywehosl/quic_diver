@@ -24,10 +24,16 @@ const trafficFlushEvery = 30 * time.Second
 
 // accountant ведёт учёт одной клиентской сессии.
 type accountant struct {
-	store *db.SQLite
-	id    string
-	hash  string
+	// cfg, а не готовая база: сессия живёт часами, а база под ней может
+	// смениться (реплика применила снимок мастера). Сохранённый указатель после
+	// подмены писал бы в копию, которую вот-вот закроют.
+	cfg  Config
+	id   string
+	hash string
 }
+
+// db — база, актуальная на сейчас.
+func (a *accountant) db() (*db.SQLite, bool) { return sqliteOf(a.cfg.Store) }
 
 // newSessionID — случайный идентификатор сессии.
 func newSessionID() string {
@@ -41,7 +47,7 @@ func newSessionID() string {
 // Возвращает nil, если учёт невозможен или не нужен (dev-узел без БД): туннель
 // в этом случае работает как раньше — учёт не должен быть условием связи.
 func beginSession(ctx context.Context, cfg Config, hash, hwid, remoteIP string) *accountant {
-	store, ok := cfg.Store.(*db.SQLite)
+	store, ok := sqliteOf(cfg.Store)
 	if !ok || hash == "" {
 		return nil
 	}
@@ -54,7 +60,7 @@ func beginSession(ctx context.Context, cfg Config, hash, hwid, remoteIP string) 
 	if row, err := store.TokenRowByHash(ctx, hash); err == nil {
 		limit = row.LimitSessions
 	}
-	a := &accountant{store: store, id: newSessionID(), hash: hash}
+	a := &accountant{cfg: cfg, id: newSessionID(), hash: hash}
 	if err := store.OpenSession(ctx, db.Session{
 		ID: a.id, TokenHash: hash, HWID: hwid, RemoteIP: remoteIP, Node: cfg.Authority,
 	}, limit); err != nil {
@@ -83,7 +89,11 @@ func (a *accountant) run(ctx context.Context, counter func() (sent, received uin
 		// Контекст запроса к этому моменту уже мёртв — пишем на своём.
 		wctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := a.store.TouchSession(wctx, a.id, a.hash, dIn, dOut); err != nil {
+		store, ok := a.db()
+		if !ok {
+			return
+		}
+		if err := store.TouchSession(wctx, a.id, a.hash, dIn, dOut); err != nil {
 			log.Printf("учёт трафика: %v", err)
 		}
 	}
@@ -93,8 +103,10 @@ func (a *accountant) run(ctx context.Context, counter func() (sent, received uin
 		case <-ctx.Done():
 			flush() // досчитать последний интервал
 			cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			if err := a.store.CloseSession(cctx, a.id); err != nil {
-				log.Printf("закрытие сессии: %v", err)
+			if store, ok := a.db(); ok {
+				if err := store.CloseSession(cctx, a.id); err != nil {
+					log.Printf("закрытие сессии: %v", err)
+				}
 			}
 			cancel()
 			return

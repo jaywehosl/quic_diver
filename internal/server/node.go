@@ -95,6 +95,12 @@ type Config struct {
 	AdminPowerPath string
 	// AdminNodesPath — путь admin-API реестра узлов, обычно "/qd-admin/nodes".
 	AdminNodesPath string
+	// AdminClusterPath — путь admin-API кластера (кто мастер, промоушен),
+	// обычно "/qd-admin/cluster".
+	AdminClusterPath string
+	// ReplicaPath — путь раздачи снимка базы соседним узлам, обычно "/qd-replica".
+	// Пусто → узел снимок не раздаёт (и мастером быть не может).
+	ReplicaPath string
 	// OutboundsPath — путь публикации выходов клиенту (метка+подсеть),
 	// обычно "/qd-outbounds". Доступ авторизованному клиенту, секреты не отдаются.
 	OutboundsPath string
@@ -209,11 +215,23 @@ func Run(ctx context.Context, cfg Config) error {
 		mux.Handle(cfg.AdminNodesPath, adminNodes(cfg))
 		log.Printf("admin-API узлов на %s", cfg.AdminNodesPath)
 	}
+	// Раздача снимка базы соседям: так узлы узнают друг о друге и о клиентах без
+	// ручной регистрации на каждой машине.
+	if cfg.ReplicaPath != "" && cfg.Store != nil {
+		mux.Handle(cfg.ReplicaPath, serveReplica(cfg))
+		log.Printf("репликация базы на %s", cfg.ReplicaPath)
+	}
+	// Кто мастер и смена мастера. Промоушен только вручную: автоматика при
+	// сетевом разделении сама плодит двух мастеров.
+	if cfg.AdminClusterPath != "" && cfg.Store != nil {
+		mux.Handle(cfg.AdminClusterPath, adminCluster(cfg))
+		log.Printf("admin-API кластера на %s", cfg.AdminClusterPath)
+	}
 	// Уборка сессий, о которых давно не слышно: узел мог умереть, не закрыв их,
 	// и тогда «активные сессии» превратились бы в кладбище, а лимит
 	// одновременных подключений заклинило бы навсегда.
-	if store, ok := cfg.Store.(*db.SQLite); ok {
-		go sweepSessions(ctx, store)
+	if _, ok := sqliteOf(cfg.Store); ok {
+		go sweepSessions(ctx, cfg)
 	}
 
 	// Публикация выходов клиенту (метка+подсеть, без секретов) — по ним клиент
@@ -417,7 +435,7 @@ func authorize(ctx context.Context, cfg Config, sess *auth.Session, token string
 	// Не клиент и не админ — может быть соседний узел. Он предъявляет СВОЙ
 	// токен, а мы сверяем его с хешем из реплики: чужих секретов у нас нет и
 	// быть не должно, иначе утечка одного узла открывала бы всю сеть.
-	if store, ok := cfg.Store.(*db.SQLite); ok {
+	if store, ok := sqliteOf(cfg.Store); ok {
 		if node, err := store.NodeByTokenHash(ctx, hash); err == nil {
 			sess.Authorize(auth.RoleNode, hash)
 			// Отмечаем соседа живым: раз он пришёл, он на связи. Отдельный

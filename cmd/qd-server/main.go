@@ -54,6 +54,11 @@ func main() {
 	upstreamToken := flag.String("upstream-token", "", "node-токен для upstream-узла")
 	adminToken := flag.String("admin-token", "", "admin-токен сети из деплоя: его хеш кладётся в БД (пусто → не трогать)")
 	nodeToken := flag.String("node-token", "", "node-токен этого узла из деплоя: его хеш кладётся в БД (пусто → не трогать)")
+	masterAddr := flag.String("master", "",
+		"адрес мастер-узла host:port при первой установке (дальше сеть узнаётся сама)")
+	masterSNI := flag.String("master-sni", "", "имя мастера для TLS/:authority (пусто → host из -master)")
+	replicaEvery := flag.Duration("replica-every", 15*time.Minute,
+		"как часто реплика забирает базу у мастера (0 — не реплицировать)")
 	addUser := flag.Bool("add-user", false, "сгенерировать клиентский токен, записать в БД и выйти (нужен -db)")
 	userLabel := flag.String("label", "", "имя клиента для -add-user")
 	flag.Parse()
@@ -98,6 +103,10 @@ func main() {
 	// БД токенов. Пусто → узел открыт (dev/e2e). В бою обязательна: иначе туннель
 	// — открытый прокси.
 	var store *db.SQLite
+	// live — та же база, но с возможностью горячей подмены: реплика применяет
+	// снимок мастера, не перезапуская узел. Перезапуск рвал бы все туннели, а
+	// обновляемся мы регулярно.
+	var live *db.Live
 	if *dbPath != "" {
 		// Восстановление из снимка применяется здесь, до открытия базы: подменить
 		// её на ходу нельзя, поэтому админ загружает файл, а подхватывает его
@@ -108,15 +117,36 @@ func main() {
 		} else if applied {
 			log.Printf("база восстановлена из снимка (прежняя сохранена как %s.prev)", *dbPath)
 		}
-		store, err = db.Open(*dbPath)
+		live, err = db.NewLive(*dbPath)
 		if err != nil {
 			log.Fatalf("db: %v", err)
 		}
-		defer store.Close()
+		defer live.Close()
+		// Для разовых операций старта база нужна напрямую. Долго этот указатель
+		// держать нельзя (подмена его обесценит) — в конфиг уходит live.
+		store = live.DB()
 		// Секреты сети из деплой-параметров → хеши в БД. Открытый секрет в БД не
 		// попадает; при репликации хеши разнесутся по узлам сети (arch2).
 		seedNetworkToken(store, *adminToken, auth.RoleAdmin)
 		seedNetworkToken(store, *nodeToken, auth.RoleNode)
+		// Кто мастер — говорит администратор при установке, один раз. Дальше узел
+		// узнаёт сеть из снимков сам, поэтому флаг на уже работающем узле ничего
+		// не переписывает (смена мастера — дело admin-API, осознанно).
+		if *masterAddr != "" {
+			sni := *masterSNI
+			if sni == "" {
+				sni, _, _ = net.SplitHostPort(*masterAddr)
+			}
+			done, err := store.BootstrapMaster(context.Background(), db.Node{
+				ID: sni, Addr: *masterAddr, SNI: sni, Enabled: true,
+				Label: "мастер (из установки)",
+			})
+			if err != nil {
+				log.Printf("мастер из установки: %v", err)
+			} else if done {
+				log.Printf("мастер сети: %s (%s) — базу забираю у него", sni, *masterAddr)
+			}
+		}
 		if counts, err := store.CountByRole(context.Background()); err == nil {
 			log.Printf("БД: %s (user=%d admin=%d node=%d)", *dbPath,
 				counts[auth.RoleUser], counts[auth.RoleAdmin], counts[auth.RoleNode])
@@ -148,8 +178,10 @@ func main() {
 		AdminBackupPath:    "/qd-admin/backup",
 		AdminPowerPath:     "/qd-admin/power",
 		AdminNodesPath:     "/qd-admin/nodes",
+		AdminClusterPath:   "/qd-admin/cluster",
+		ReplicaPath:        server.ReplicaPath,
 		OutboundsPath:      "/qd-outbounds",
-		Store:              storeOrNil(store),
+		Store:              storeOrNil(live),
 		Pool:               poolFor(store, *poolCIDR),
 		TLS:                tlsConf,
 		Assign:             []netip.Prefix{pfx},
@@ -204,6 +236,29 @@ func main() {
 		if n := len(links.Nodes()); n > 0 {
 			log.Printf("соседей в реестре: %d", n)
 		}
+
+		// Репликация базы с мастера. Реплика узнаёт о новых узлах и клиентах
+		// сама — без неё каждый узел пришлось бы регистрировать руками на всех
+		// остальных, что и делали до сих пор.
+		rep := &server.Replicator{
+			Live: live, SelfID: cfg.NodeID, SelfToken: *nodeToken,
+			RT: nodeRoundTripper(ctx), Every: *replicaEvery,
+			// После подмены перечитываем то, что построено по базе: иначе
+			// свежий реестр лежал бы в базе, а узел ходил бы по старому.
+			OnUpdate: func(c context.Context) {
+				fresh := live.DB()
+				if err := links.Reload(c, fresh); err != nil {
+					log.Printf("реестр узлов после репликации: %v", err)
+				}
+				if err := obs.Reload(c, fresh); err != nil {
+					log.Printf("выходы после репликации: %v", err)
+				}
+			},
+		}
+		if *replicaEvery > 0 {
+			go rep.Run(ctx)
+			log.Printf("репликация базы: раз в %s", *replicaEvery)
+		}
 	}
 
 	log.Printf("узел на %s (authority=%s, назначаю клиенту %s)", *listen, *authority, *assign)
@@ -211,6 +266,28 @@ func main() {
 		log.Fatalf("run: %v", err)
 	}
 	log.Print("остановлен")
+}
+
+// nodeRoundTripper — HTTP-доступ к соседнему узлу для репликации.
+//
+// Отдельная сессия, а не связь из NodeLinks: репликация ходит раз в четверть
+// часа, и держать ради неё соединение с мастером постоянно смысла нет, а вот
+// зависеть от состояния кэша транзитных связей — лишний риск.
+func nodeRoundTripper(base context.Context) server.NodeRoundTripper {
+	return func(ctx context.Context, node db.Node, selfToken string) (http.RoundTripper, io.Closer, error) {
+		authority := node.Authority()
+		sni, _, _ := net.SplitHostPort(node.Addr)
+		if sni == "" {
+			sni = authority
+		}
+		tlsConf := &tls.Config{InsecureSkipVerify: true, ServerName: sni}
+		link, err := cip.DialLink(ctx, node.Addr, tlsConf, selfToken,
+			"https://"+authority+"/qd-auth")
+		if err != nil {
+			return nil, nil, err
+		}
+		return link.H3Conn(), link, nil
+	}
 }
 
 // nodeDialer — фабрика связей с соседними узлами из реестра.
@@ -262,7 +339,7 @@ func chainDialer(base context.Context) server.ChainDialer {
 
 // storeOrNil отдаёт nil-интерфейс, если БД нет: server.Config.Store — интерфейс,
 // а типизированный nil-указатель в нём != nil и сломал бы проверку «узел открыт».
-func storeOrNil(s *db.SQLite) db.Store {
+func storeOrNil(s *db.Live) db.Store {
 	if s == nil {
 		return nil
 	}

@@ -25,7 +25,7 @@ const sessionSweepEvery = time.Minute
 // связи, а лимит одновременных подключений тогда срабатывал бы впустую.
 const sessionStale = 5 * time.Minute
 
-func sweepSessions(ctx context.Context, store *db.SQLite) {
+func sweepSessions(ctx context.Context, cfg Config) {
 	t := time.NewTicker(sessionSweepEvery)
 	defer t.Stop()
 	for {
@@ -33,6 +33,10 @@ func sweepSessions(ctx context.Context, store *db.SQLite) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			store, ok := sqliteOf(cfg.Store)
+			if !ok {
+				continue
+			}
 			if n, err := store.SweepSessions(ctx, sessionStale); err != nil {
 				log.Printf("уборка сессий: %v", err)
 			} else if n > 0 {
@@ -110,7 +114,7 @@ func adminStats(cfg Config) http.Handler {
 		if cfg.Outbounds != nil {
 			st.Outputs = cfg.Outbounds.Labels()
 		}
-		if store, ok := cfg.Store.(*db.SQLite); ok {
+		if store, ok := sqliteOf(cfg.Store); ok {
 			st.Clients = clientSnapshot(r.Context(), store)
 		}
 		writeJSON(w, st)

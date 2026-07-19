@@ -78,6 +78,28 @@ CREATE TABLE IF NOT EXISTS outbounds (
 	updated_at INTEGER NOT NULL
 );
 
+-- Узлы сети. Реплицируется целиком: каждый узел знает всех соседей и может
+-- принимать клиентов и вести транзит без ручной настройки связей.
+--
+-- Секретов здесь НЕТ. token_hash — хеш node-токена узла, а сам токен остаётся
+-- только у него: подключаясь к соседу, узел предъявляет СВОЙ токен, а сосед
+-- проверяет его по этому хешу. Поэтому утечка одного узла не даёт доступа к
+-- остальным (общий node-токен на всю сеть — давал), и копировать секреты между
+-- узлами не нужно.
+CREATE TABLE IF NOT EXISTS nodes (
+	id         TEXT PRIMARY KEY,            -- идентификатор узла (обычно его домен)
+	label      TEXT NOT NULL DEFAULT '',    -- человеческое имя для панели
+	category   TEXT NOT NULL DEFAULT '',    -- entry | exit (задаёт админ)
+	tags       TEXT NOT NULL DEFAULT '',    -- через запятую; для глаз и для auto:<тег>
+	addr       TEXT NOT NULL DEFAULT '',    -- host:port для подключения
+	sni        TEXT NOT NULL DEFAULT '',    -- имя для TLS/:authority (может быть иным, чем addr)
+	token_hash TEXT NOT NULL DEFAULT '',    -- хеш node-токена ЭТОГО узла
+	enabled    INTEGER NOT NULL DEFAULT 1,
+	last_seen  INTEGER NOT NULL DEFAULT 0,  -- heartbeat: когда узел давал о себе знать
+	updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS nodes_category ON nodes(category);
+
 -- Устройства клиента. Против шаринга токена: их число ограничено (limit_devices
 -- у токена), лишние админ отзывает поимённо.
 --

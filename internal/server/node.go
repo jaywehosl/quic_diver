@@ -90,6 +90,8 @@ type Config struct {
 	AdminBackupPath string
 	// AdminPowerPath — путь admin-API перезапуска/питания, обычно "/qd-admin/power".
 	AdminPowerPath string
+	// AdminNodesPath — путь admin-API реестра узлов, обычно "/qd-admin/nodes".
+	AdminNodesPath string
 	// OutboundsPath — путь публикации выходов клиенту (метка+подсеть),
 	// обычно "/qd-outbounds". Доступ авторизованному клиенту, секреты не отдаются.
 	OutboundsPath string
@@ -197,6 +199,12 @@ func Run(ctx context.Context, cfg Config) error {
 	if cfg.AdminPowerPath != "" {
 		mux.Handle(cfg.AdminPowerPath, adminPower(cfg))
 		log.Printf("admin-API питания на %s", cfg.AdminPowerPath)
+	}
+	// Реестр узлов: кто есть в сети и кто из них вход, кто выход. Аутбаундов
+	// (ручных связей между узлами) здесь нет — маршрут живёт в метке трафика.
+	if cfg.AdminNodesPath != "" && cfg.Store != nil {
+		mux.Handle(cfg.AdminNodesPath, adminNodes(cfg))
+		log.Printf("admin-API узлов на %s", cfg.AdminNodesPath)
 	}
 	// Уборка сессий, о которых давно не слышно: узел мог умереть, не закрыв их,
 	// и тогда «активные сессии» превратились бы в кладбище, а лимит

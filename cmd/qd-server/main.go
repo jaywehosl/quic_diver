@@ -140,6 +140,7 @@ func main() {
 		AdminStatsPath:     "/qd-admin/stats",
 		AdminBackupPath:    "/qd-admin/backup",
 		AdminPowerPath:     "/qd-admin/power",
+		AdminNodesPath:     "/qd-admin/nodes",
 		OutboundsPath:      "/qd-outbounds",
 		Store:              storeOrNil(store),
 		Pool:               poolFor(store, *poolCIDR),

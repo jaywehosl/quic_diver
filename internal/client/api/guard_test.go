@@ -182,3 +182,52 @@ func TestTokensAreUniquePerRun(t *testing.T) {
 		t.Fatalf("ключи повторяются: %q / %q", a, b)
 	}
 }
+
+// Ключи — шестнадцатеричные (см. NewToken), поэтому в тестах печенья тоже
+// ASCII: не-ASCII значение Go отбросил бы, и проверка ничего бы не значила.
+const hexToken = "a1b2c3d4e5f6"
+
+// Ключ приходит ссылкой один раз, а стили и скрипт браузер грузит уже сам —
+// без печенья панель осталась бы голым HTML. Поймано живой проверкой.
+func TestTokenFromQuerySetsCookie(t *testing.T) {
+	h, _ := okHandler()
+	w := httptest.NewRecorder()
+	guard(hexToken, h).ServeHTTP(w, panelReq(http.MethodGet, "/?token="+hexToken, ""))
+
+	var found *http.Cookie
+	for _, c := range w.Result().Cookies() {
+		if c.Name == cookieName {
+			found = c
+		}
+	}
+	if found == nil {
+		t.Fatal("печенье с ключом не поставлено — статика получит 401")
+	}
+	if !found.HttpOnly || found.SameSite != http.SameSiteStrictMode {
+		t.Fatalf("печенье без защиты: HttpOnly=%v SameSite=%v", found.HttpOnly, found.SameSite)
+	}
+}
+
+// Дальше ключ носит браузер: заголовка у запроса за стилями нет.
+func TestCookieAuthorizesFollowingRequests(t *testing.T) {
+	h, reached := okHandler()
+	r := panelReq(http.MethodGet, "/app.css", "")
+	r.AddCookie(&http.Cookie{Name: cookieName, Value: hexToken})
+
+	guard(hexToken, h).ServeHTTP(httptest.NewRecorder(), r)
+	if !*reached {
+		t.Fatal("запрос с печеньем отклонён — панель не получит стили")
+	}
+}
+
+// Чужое печенье не подходит.
+func TestWrongCookieRejected(t *testing.T) {
+	h, reached := okHandler()
+	r := panelReq(http.MethodGet, "/app.css", "")
+	r.AddCookie(&http.Cookie{Name: cookieName, Value: "deadbeef"})
+
+	guard(hexToken, h).ServeHTTP(httptest.NewRecorder(), r)
+	if *reached {
+		t.Fatal("чужое печенье принято")
+	}
+}

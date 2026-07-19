@@ -77,7 +77,11 @@ type testRequest struct {
 type testResult struct {
 	// Out — метка выхода: direct | <узел> | auto:<тег>.
 	Out string `json:"out"`
-	// Rule — номер сработавшего правила (с 1); 0 — не сработало ни одно.
+	// Rule — номер СТРОКИ в редакторе (с 1); 0 — не сработало ни одно правило.
+	//
+	// Именно строки, а не порядковый номер правила: человек смотрит в тот же
+	// текст, где есть комментарии и пустые строки, и «правило №2» отправило бы
+	// его не туда.
 	Rule int `json:"rule"`
 	// RuleText — само правило, как оно записано.
 	RuleText string `json:"rule_text,omitempty"`
@@ -128,9 +132,8 @@ func (d Deps) testRule(w http.ResponseWriter, r *http.Request) {
 	out, idx := rs.Explain(flow)
 	res := testResult{Out: out, Default: idx < 0}
 	if idx >= 0 {
-		res.Rule = idx + 1
-		if idx < len(cfg.Routing.Rules) {
-			res.RuleText = cfg.Routing.Rules[idx]
+		if line, text, ok := ruleSource(cfg.Routing.Rules, idx); ok {
+			res.Rule, res.RuleText = line, text
 		}
 	}
 	// Про per-app честно предупреждаем: правило принимается, но имя процесса в
@@ -139,6 +142,27 @@ func (d Deps) testRule(w http.ResponseWriter, r *http.Request) {
 		res.Note = "правила по процессу пока не срабатывают на живом трафике: имя процесса не определяется"
 	}
 	writeJSON(w, res)
+}
+
+// ruleSource находит строку редактора, породившую правило №idx.
+//
+// Прямое обращение по индексу здесь неверно: комментарии и пустые строки
+// правилами не становятся, поэтому нумерация набора и нумерация строк
+// расходятся. Наступали на это вживую — тестер уверенно показывал соседнее
+// правило, и доверие к нему было бы потеряно с первого же раза.
+func ruleSource(lines []string, idx int) (line int, text string, ok bool) {
+	n := 0
+	for i, l := range lines {
+		t := strings.TrimSpace(l)
+		if t == "" || strings.HasPrefix(t, "#") {
+			continue
+		}
+		if n == idx {
+			return i + 1, l, true
+		}
+		n++
+	}
+	return 0, "", false
 }
 
 func usesProcessRules(cfg config.Config) bool {

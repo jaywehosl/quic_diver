@@ -32,3 +32,24 @@ func TestParseSkipsComments(t *testing.T) {
 		t.Fatalf("комментарии не пропущены: %+v", rules)
 	}
 }
+
+// Пробелы вокруг разделителей не должны ломать правило: «dom:youtube.com =
+// auto:de» читается лучше слитного, и панель со справкой показывают именно так.
+func TestParseTolerantToSpaces(t *testing.T) {
+	rules, err := ParseRules("  dom:youtube.com = auto:de  \n cidr:192.168.0.0/16 = direct \nport: 22 =direct")
+	if err != nil {
+		t.Fatalf("пробелы сломали разбор: %v", err)
+	}
+	if len(rules) != 3 {
+		t.Fatalf("правил %d: %+v", len(rules), rules)
+	}
+	if rules[0].Match.Domain != "youtube.com" || rules[0].Out != "auto:de" {
+		t.Fatalf("домен: %+v", rules[0])
+	}
+	if !rules[1].Match.CIDR.IsValid() || rules[1].Out != "direct" {
+		t.Fatalf("подсеть: %+v", rules[1])
+	}
+	if rules[2].Match.Port != 22 {
+		t.Fatalf("порт: %+v", rules[2])
+	}
+}

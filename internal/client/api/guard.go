@@ -67,6 +67,20 @@ func guard(tok Token, next http.Handler) http.Handler {
 			http.Error(w, "нужен ключ панели", http.StatusUnauthorized)
 			return
 		}
+		// Ключ пришёл ссылкой — закрепляем его печеньем.
+		//
+		// Без этого работает только первый запрос: разметку браузер получает с
+		// ключом в адресе, а стили и скрипт грузит уже сам, без него, и панель
+		// остаётся голым HTML. Наступали на это вживую.
+		//
+		// Strict + HttpOnly: печенье не уходит с чужих страниц и не читается
+		// скриптом, поэтому дополнительным путём утечки ключа не становится.
+		if r.URL.Query().Get("token") != "" && !cookieHasToken(r, tok) {
+			http.SetCookie(w, &http.Cookie{
+				Name: cookieName, Value: string(tok), Path: "/",
+				HttpOnly: true, SameSite: http.SameSiteStrictMode,
+			})
+		}
 		if changes(r.Method) && !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
 			// Отсекает форму со стороннего сайта: она не умеет слать JSON, а
 			// значит браузер сделает preflight, которого мы не разрешаем.
@@ -87,19 +101,31 @@ func fromLoopback(r *http.Request) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// tokenFrom достаёт ключ из заголовка или из адреса.
+// tokenFrom достаёт ключ откуда придётся — три источника, и каждый нужен:
 //
-// Из адреса — потому что первый заход в панель делается ссылкой, и положить
-// заголовок туда неоткуда. Дальше страница носит ключ в заголовке.
+//   - адрес: первый заход делается ссылкой, заголовок туда не положить;
+//   - печенье: браузер сам грузит стили и скрипт, ключа в тех запросах нет;
+//   - заголовок: для curl и для запросов панели, где он нагляднее.
 func tokenFrom(r *http.Request) string {
 	if v := r.Header.Get(HeaderPanelToken); v != "" {
 		return v
 	}
+	if c, err := r.Cookie(cookieName); err == nil && c.Value != "" {
+		return c.Value
+	}
 	return r.URL.Query().Get("token")
+}
+
+func cookieHasToken(r *http.Request, tok Token) bool {
+	c, err := r.Cookie(cookieName)
+	return err == nil && tok.Equal(c.Value)
 }
 
 // HeaderPanelToken — заголовок с ключом панели.
 const HeaderPanelToken = "X-Qd-Panel"
+
+// cookieName — где браузер носит ключ между запросами.
+const cookieName = "qd_panel"
 
 // originAllowed — пришёл ли запрос от самой панели, а не со стороннего сайта.
 //

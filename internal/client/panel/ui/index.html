@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QUIC Diver</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="brand">QUIC&nbsp;Diver</div>
+
+  <!-- Состояние видно на любом экране: панель открывают, чтобы понять, что
+       происходит, и прятать это за вкладкой незачем. -->
+  <div class="state" id="state">
+    <span class="dot" id="dot"></span>
+    <span id="stateText">загружаю…</span>
+    <span class="muted" id="stateNode"></span>
+  </div>
+
+  <div class="actions">
+    <button id="btnConnect" class="primary">Подключить</button>
+    <button id="btnDisconnect" hidden>Отключить</button>
+  </div>
+</header>
+
+<nav class="tabs" id="tabs">
+  <a href="#rules" data-tab="rules">Правила</a>
+  <a href="#node" data-tab="node">Подключение</a>
+  <a href="#exits" data-tab="exits">Выходы</a>
+  <a href="#notices" data-tab="notices">Уведомления<span class="badge" id="unread" hidden></span></a>
+  <a href="#admin" data-tab="admin">Сеть</a>
+  <a href="#help" data-tab="help">Справка</a>
+</nav>
+
+<main>
+
+<!-- ПРАВИЛА: главный экран. Ради него панель и открывают. -->
+<section id="tab-rules" class="tab">
+  <div class="cols">
+    <div class="col">
+      <h2>Правила маршрутизации</h2>
+      <p class="hint">
+        По одному правилу на строку, сверху вниз — <b>первое совпавшее выигрывает</b>.
+        Строка с <code>#</code> в начале не действует.
+      </p>
+      <textarea id="rules" spellcheck="false" rows="14"
+                placeholder="dom:youtube.com = auto:de&#10;cidr:10.0.0.0/8 = direct&#10;port:22 = direct"></textarea>
+
+      <div class="row">
+        <label>По умолчанию
+          <input id="defaultOut" list="outs" placeholder="direct">
+        </label>
+        <button id="btnSaveRules" class="primary">Сохранить</button>
+        <span id="rulesMsg" class="msg"></span>
+      </div>
+
+      <details class="ref">
+        <summary>Как писать правила</summary>
+        <table>
+          <tr><td><code>dom:youtube.com</code></td><td>домен и его поддомены</td></tr>
+          <tr><td><code>cidr:10.0.0.0/8</code></td><td>подсеть назначения</td></tr>
+          <tr><td><code>port:443</code></td><td>порт назначения</td></tr>
+          <tr><td><code>proc:chrome.exe</code></td><td>процесс <b class="warn">(пока не работает)</b></td></tr>
+        </table>
+        <p class="hint">
+          Справа от <code>=</code> — куда направить: <code>direct</code> (наружу здесь),
+          идентификатор узла или <code>auto:тег</code> (лучший узел с этим тегом).
+        </p>
+      </details>
+    </div>
+
+    <!-- ТЕСТЕР: лекарство от главной боли. Правила матчатся по порядку, и
+         «почему пошло не туда» иначе выясняется на живом трафике. -->
+    <div class="col side">
+      <h2>Проверка</h2>
+      <p class="hint">Куда пойдёт трафик к адресу — по текущим сохранённым правилам.</p>
+      <div class="row">
+        <input id="testHost" placeholder="rr1.youtube.com или 10.1.2.3" autocomplete="off">
+        <input id="testPort" placeholder="443" class="narrow" inputmode="numeric">
+        <button id="btnTest">Проверить</button>
+      </div>
+      <div id="testResult" class="result" hidden></div>
+    </div>
+  </div>
+</section>
+
+<!-- ПОДКЛЮЧЕНИЕ: узел, токен, что перехватывать. -->
+<section id="tab-node" class="tab" hidden>
+  <h2>Узел и доступ</h2>
+  <p class="hint">
+    Адрес — <code>хост:порт</code> или <code>IP:порт</code>. Если указан IP, впишите домен
+    в SNI: тогда DNS в подключении не участвует, а сертификат остаётся валидным.
+  </p>
+  <table class="grid" id="entries"></table>
+  <div class="row">
+    <button id="btnAddEntry">Добавить точку входа</button>
+    <span class="hint">Резервные пробуются по порядку, если первая недоступна.</span>
+  </div>
+
+  <label class="wide">Токен доступа
+    <input id="token" type="password" autocomplete="off" placeholder="qd_…">
+  </label>
+
+  <h2>Перехват</h2>
+  <div class="row wrap">
+    <label class="check"><input type="checkbox" id="capIPv4"> IPv4</label>
+    <label class="check"><input type="checkbox" id="capIPv6"> IPv6</label>
+    <label class="check"><input type="checkbox" id="manageDNS"> Забирать DNS</label>
+    <label class="check"><input type="checkbox" id="manageProxy"> Снимать системный прокси</label>
+    <label>NAT46
+      <select id="nat46"><option value="auto">авто</option><option value="on">вкл</option><option value="off">выкл</option></select>
+    </label>
+  </div>
+  <p class="hint">
+    Оба семейства выключены — перехватываются оба. «Забирать DNS» нужно, чтобы запросы
+    шли через узел: иначе провайдер видит и подменяет их.
+  </p>
+
+  <div class="row">
+    <button id="btnSaveNode" class="primary">Сохранить</button>
+    <span id="nodeMsg" class="msg"></span>
+  </div>
+</section>
+
+<!-- ВЫХОДЫ: что публикует узел. -->
+<section id="tab-exits" class="tab" hidden>
+  <h2>Доступные выходы</h2>
+  <p class="hint">Метки для правил. Приезжают с узла — правило можно писать не вслепую.</p>
+  <div class="row"><button id="btnReloadExits">Обновить</button><span id="exitsMsg" class="msg"></span></div>
+  <table class="grid" id="exits"></table>
+</section>
+
+<!-- УВЕДОМЛЕНИЯ -->
+<section id="tab-notices" class="tab" hidden>
+  <h2>Уведомления</h2>
+  <p class="hint">
+    Сюда попадает то, где система отступила от правил, чтобы оставить вас со связью:
+    выход был недоступен, трафик ушёл не туда, куда просили.
+  </p>
+  <div class="row">
+    <button id="btnReadAll">Отметить прочитанными</button>
+    <button id="btnClearNotices">Очистить</button>
+  </div>
+  <div id="notices" class="list"></div>
+</section>
+
+<!-- СЕТЬ: управление узлами по админ-токену. -->
+<section id="tab-admin" class="tab" hidden>
+  <h2>Управление сетью</h2>
+  <p class="hint">
+    Админ-токен нужен только на время сеанса и <b>не сохраняется</b> — ключ от всей
+    сети не должен лежать на диске рядом с клиентским.
+  </p>
+  <div class="row">
+    <input id="adminToken" type="password" placeholder="админ-токен" autocomplete="off">
+    <button id="btnAdminLoad" class="primary">Войти</button>
+    <span id="adminMsg" class="msg"></span>
+  </div>
+
+  <div id="adminBody" hidden>
+    <div class="row wrap subtabs">
+      <button data-admin="nodes" class="primary">Узлы</button>
+      <button data-admin="users">Клиенты</button>
+      <button data-admin="stats">Состояние</button>
+      <button data-admin="cluster">Кластер</button>
+    </div>
+    <div id="adminView"></div>
+  </div>
+</section>
+
+<!-- СПРАВКА -->
+<section id="tab-help" class="tab" hidden>
+  <div id="help"></div>
+</section>
+
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>

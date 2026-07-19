@@ -483,3 +483,28 @@ func TestNotificationsAbsentIsEmpty(t *testing.T) {
 		t.Fatalf("статус %d: %s", w.Code, w.Body)
 	}
 }
+
+// Комментарии и пустые строки правилами не становятся, поэтому нумерация
+// набора и нумерация строк редактора расходятся. Тестер обязан показывать
+// СТРОКУ: человек смотрит в тот же текст, и «правило №2» отправило бы его не
+// туда. Поймано на живых данных — юнит-тест без комментариев этого не видел.
+func TestRuleTesterPointsAtEditorLine(t *testing.T) {
+	d, _, _, cf := deps(t)
+	cf.cfg.Routing.Rules = []string{
+		"# банк мимо туннеля",
+		"dom:bank.example = direct",
+		"",
+		"dom:youtube.com = auto:de",
+	}
+
+	res := testRuleCall(t, Handler(testToken, d, nil), `{"host":"rr1.youtube.com"}`)
+	if res.Out != "auto:de" {
+		t.Fatalf("выход %q", res.Out)
+	}
+	if res.Rule != 4 {
+		t.Fatalf("строка %d, ожидалась 4 (комментарий и пустая строка не правила)", res.Rule)
+	}
+	if !strings.Contains(res.RuleText, "youtube") {
+		t.Fatalf("текст правила: %q", res.RuleText)
+	}
+}

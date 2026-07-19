@@ -36,10 +36,14 @@ func ParseRules(s string) ([]Rule, error) {
 		if !ok || out == "" {
 			return nil, fmt.Errorf("правило %q: нужно матчер=выход", part)
 		}
-		kind, val, ok := strings.Cut(cond, ":")
+		kind, val, ok := strings.Cut(strings.TrimSpace(cond), ":")
 		if !ok {
 			return nil, fmt.Errorf("правило %q: нужен префикс матчера (dom/proc/cidr/port)", part)
 		}
+		// Пробелы вокруг разделителей срезаем: правила пишут руками и в панели, и
+		// «dom:youtube.com = auto:de» читается лучше слитного. Требовать
+		// отсутствия пробелов значило бы ловить человека на пустом месте.
+		kind, val = strings.TrimSpace(kind), strings.TrimSpace(val)
 		r := Rule{Out: strings.TrimSpace(out)}
 		switch kind {
 		case "dom":

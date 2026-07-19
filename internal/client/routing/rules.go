@@ -68,13 +68,30 @@ func Compile(rules []Rule, def string) *Ruleset {
 // Classify возвращает метку выхода для флоу. Первое совпавшее правило выигрывает;
 // нет совпадений → выход по умолчанию.
 func (rs *Ruleset) Classify(f Flow) string {
+	out, _ := rs.Explain(f)
+	return out
+}
+
+// Explain — то же, но с указанием, КАКОЕ правило сработало (-1 — ни одно, ушло
+// в выход по умолчанию).
+//
+// Нужен панели: правила матчатся по порядку, и «почему трафик пошёл не туда»
+// иначе выясняется экспериментом на живом трафике. Показать сработавшее правило
+// дешевле, чем заставлять человека угадывать.
+func (rs *Ruleset) Explain(f Flow) (out string, rule int) {
 	for i := range rs.rules {
 		if out, ok := matchRule(&rs.rules[i], f); ok {
-			return out
+			return out, i
 		}
 	}
-	return rs.def
+	return rs.def, -1
 }
+
+// Rules — копия правил набора (панели нужно показать их с номерами).
+func (rs *Ruleset) Rules() []Rule { return append([]Rule(nil), rs.rules...) }
+
+// Default — выход по умолчанию.
+func (rs *Ruleset) Default() string { return rs.def }
 
 func matchRule(r *Rule, f Flow) (string, bool) {
 	m := &r.Match

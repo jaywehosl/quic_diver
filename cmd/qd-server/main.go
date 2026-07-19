@@ -99,6 +99,15 @@ func main() {
 	// — открытый прокси.
 	var store *db.SQLite
 	if *dbPath != "" {
+		// Восстановление из снимка применяется здесь, до открытия базы: подменить
+		// её на ходу нельзя, поэтому админ загружает файл, а подхватывает его
+		// следующий запуск. Прежняя база отодвигается в .prev — если в снимке
+		// окажется не то, есть куда вернуться.
+		if applied, err := db.ApplyPendingRestore(*dbPath); err != nil {
+			log.Fatalf("восстановление базы: %v", err)
+		} else if applied {
+			log.Printf("база восстановлена из снимка (прежняя сохранена как %s.prev)", *dbPath)
+		}
 		store, err = db.Open(*dbPath)
 		if err != nil {
 			log.Fatalf("db: %v", err)
@@ -129,6 +138,8 @@ func main() {
 		AdminUsersPath:     "/qd-admin/users",
 		AdminSessionsPath:  "/qd-admin/sessions",
 		AdminStatsPath:     "/qd-admin/stats",
+		AdminBackupPath:    "/qd-admin/backup",
+		AdminPowerPath:     "/qd-admin/power",
 		OutboundsPath:      "/qd-outbounds",
 		Store:              storeOrNil(store),
 		Pool:               poolFor(store, *poolCIDR),

@@ -83,6 +83,10 @@ type Config struct {
 	AdminSessionsPath string
 	// AdminStatsPath — путь admin-API состояния узла, обычно "/qd-admin/stats".
 	AdminStatsPath string
+	// AdminBackupPath — путь admin-API снимков базы, обычно "/qd-admin/backup".
+	AdminBackupPath string
+	// AdminPowerPath — путь admin-API перезапуска/питания, обычно "/qd-admin/power".
+	AdminPowerPath string
 	// OutboundsPath — путь публикации выходов клиенту (метка+подсеть),
 	// обычно "/qd-outbounds". Доступ авторизованному клиенту, секреты не отдаются.
 	OutboundsPath string
@@ -171,6 +175,16 @@ func Run(ctx context.Context, cfg Config) error {
 	if cfg.AdminStatsPath != "" {
 		mux.Handle(cfg.AdminStatsPath, adminStats(cfg))
 		log.Printf("admin-API состояния на %s", cfg.AdminStatsPath)
+	}
+	// Снимок базы и восстановление (arch3): переезд узла на другую машину с тем
+	// же доменом не должен ничего менять для клиентов.
+	if cfg.AdminBackupPath != "" && cfg.Store != nil {
+		mux.Handle(cfg.AdminBackupPath, adminBackup(cfg))
+		log.Printf("admin-API снимков базы на %s", cfg.AdminBackupPath)
+	}
+	if cfg.AdminPowerPath != "" {
+		mux.Handle(cfg.AdminPowerPath, adminPower(cfg))
+		log.Printf("admin-API питания на %s", cfg.AdminPowerPath)
 	}
 	// Уборка сессий, о которых давно не слышно: узел мог умереть, не закрыв их,
 	// и тогда «активные сессии» превратились бы в кладбище, а лимит

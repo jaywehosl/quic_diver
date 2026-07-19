@@ -22,15 +22,17 @@ import (
 
 type fakeService struct {
 	mu        sync.Mutex
+	gotCtx    context.Context
 	state     service.State
 	connErr   error
 	discErr   error
 	connected bool
 }
 
-func (s *fakeService) Connect(context.Context) error {
+func (s *fakeService) Connect(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.gotCtx = ctx
 	if s.connErr != nil {
 		return s.connErr
 	}
@@ -506,5 +508,33 @@ func TestRuleTesterPointsAtEditorLine(t *testing.T) {
 	}
 	if !strings.Contains(res.RuleText, "youtube") {
 		t.Fatalf("текст правила: %q", res.RuleText)
+	}
+}
+
+// Сессия обязана пережить ответ панели.
+//
+// Connect с контекстом HTTP-запроса гасит туннель через миллисекунды после
+// нажатия «Подключить»: запрос отвечен — контекст отменён. Из трея при этом всё
+// работало, потому что там контекст жизни процесса, и разница была ровно в нём.
+func TestConnectUsesLongLivedContext(t *testing.T) {
+	d, svc, _, _ := deps(t)
+	base, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d.Base = base
+
+	w := call(t, Handler(testToken, d, nil), http.MethodPost, "/api/connect", "{}")
+	if w.Code != http.StatusOK {
+		t.Fatalf("статус %d: %s", w.Code, w.Body)
+	}
+	if svc.gotCtx == nil {
+		t.Fatal("контекст не передан")
+	}
+	// Контекст запроса к этому моменту уже мёртв; контекст клиента — жив.
+	if svc.gotCtx.Err() != nil {
+		t.Fatal("сессия получила отменённый контекст — туннель погаснет сразу")
+	}
+	cancel()
+	if svc.gotCtx.Err() == nil {
+		t.Fatal("сессия получила не тот контекст: отмена клиента её не гасит")
 	}
 }

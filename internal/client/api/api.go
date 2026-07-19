@@ -23,6 +23,13 @@ type Deps struct {
 	Config ConfigStore
 	// Quit гасит клиента целиком (пункт «Выйти» в трее).
 	Quit func()
+	// Base — контекст ЖИЗНИ КЛИЕНТА.
+	//
+	// Сессию нельзя поднимать на контексте HTTP-запроса: он отменяется, как
+	// только запрос отвечен, и туннель гаснет через миллисекунды после
+	// нажатия «Подключить». Наступали на это вживую — из трея работало, из
+	// панели нет, и разница была ровно в контексте.
+	Base context.Context
 	// Notices — уведомления: то, о чём пользователь обязан узнать сам.
 	Notices Notices
 }
@@ -129,8 +136,16 @@ func sessionName(s service.State) string {
 	}
 }
 
+// base — контекст жизни клиента (или фон, если не задан).
+func (d Deps) base() context.Context {
+	if d.Base != nil {
+		return d.Base
+	}
+	return context.Background()
+}
+
 func (d Deps) connect(w http.ResponseWriter, r *http.Request) {
-	if err := d.Service.Connect(r.Context()); err != nil {
+	if err := d.Service.Connect(d.base()); err != nil {
 		fail(w, http.StatusConflict, err)
 		return
 	}

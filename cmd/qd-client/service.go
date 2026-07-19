@@ -83,6 +83,9 @@ func startRuntime(ctx context.Context, o options, cfg config.Config, quit contex
 	h := api.Handler(tok, api.Deps{
 		Service: rt.svc, Control: ctl, Config: live, Notices: notices,
 		Quit: func() { quit() },
+		// Контекст жизни клиента, а не запроса: сессия обязана пережить
+		// ответ панели.
+		Base: ctx,
 	}, panel.Handler())
 
 	ln, err := net.Listen("tcp", rt.addr)

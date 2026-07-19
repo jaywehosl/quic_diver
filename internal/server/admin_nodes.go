@@ -2,7 +2,10 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -37,7 +40,7 @@ func adminNodes(cfg Config) http.Handler {
 		case http.MethodGet:
 			listNodes(w, r, store, cfg)
 		case http.MethodPost:
-			addNode(w, r, store)
+			addNode(w, r, store, cfg)
 		case http.MethodPatch:
 			patchNode(w, r, store)
 		case http.MethodDelete:
@@ -99,7 +102,7 @@ type addNodeReq struct {
 	Tags     []string `json:"tags,omitempty"`
 }
 
-func addNode(w http.ResponseWriter, r *http.Request, store *db.SQLite) {
+func addNode(w http.ResponseWriter, r *http.Request, store *db.SQLite, cfg Config) {
 	var req addNodeReq
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192)).Decode(&req); err != nil {
 		http.Error(w, "битый json", http.StatusBadRequest)
@@ -133,12 +136,29 @@ func addNode(w http.ResponseWriter, r *http.Request, store *db.SQLite) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	// Токен нужен установщику узла и больше нигде: в базе только хеш.
+	// Токен нужен установщику узла и больше нигде: в базе только хеш. Сразу
+	// отдаём готовую команду — иначе администратор собирал бы её руками, а
+	// токен показывается ровно один раз, и переспросить будет негде.
 	writeJSON(w, map[string]any{
-		"node":  node,
-		"token": token,
-		"note":  "токен узла показывается один раз — он уйдёт в скрипт установки",
+		"node":    node,
+		"token":   token,
+		"install": installCommand(cfg, node.ID, token),
+		"note":    "токен узла показывается один раз — выполните install на новой машине",
 	})
+}
+
+// installCommand — что выполнить на новой машине, чтобы она вошла в сеть.
+func installCommand(cfg Config, id, token string) string {
+	if cfg.Authority == "" {
+		return ""
+	}
+	host, port := cfg.Authority, "443"
+	if h, p, err := net.SplitHostPort(cfg.Authority); err == nil {
+		host, port = h, p
+	}
+	return fmt.Sprintf(
+		`curl -fsS -H "X-Qd-Token: %s" "https://%s:%s%s?id=%s&token=%s" | sh`,
+		token, host, port, InstallPath, url.QueryEscape(id), url.QueryEscape(token))
 }
 
 // patchNodeReq — правка узла. Пустые поля не трогаются.

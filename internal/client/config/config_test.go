@@ -25,7 +25,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	want := Default()
 	want.Node = Node{
-		Entries: []Entry{{Addr: "localhost:443", SNI: "localhost:8443"}},
+		Entries: []Entry{{Addr: "203.0.113.10:443", SNI: "node.example"}},
 		Token:   "qd_secret",
 	}
 	want.Routing.Rules = []string{"dom:youtube.com=chain"}
@@ -39,7 +39,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 		t.Fatalf("load: %v", err)
 	}
 	if got.Node.Token != want.Node.Token || len(got.Node.Entries) != 1 ||
-		got.Node.Entries[0].SNI != "localhost:8443" ||
+		got.Node.Entries[0].SNI != "node.example" ||
 		got.Transport.BrutalMbps != 700 || len(got.Routing.Rules) != 1 {
 		t.Fatalf("после круга настройки разошлись: %+v", got)
 	}
@@ -123,10 +123,12 @@ func TestBrokenFileReportsError(t *testing.T) {
 
 // SNI отделён от адреса: идём на голый IP, представляемся доменом.
 func TestEntryAuthorityPrefersSNI(t *testing.T) {
-	if got := (Entry{Addr: "localhost:443", SNI: "localhost:8443"}).Authority(); got != "localhost:8443" {
+	// Голый IP в адресе, домен — в SNI: так DNS в подключении не участвует, а
+	// сертификат всё равно валиден (адреса из TEST-NET-3, RFC 5737).
+	if got := (Entry{Addr: "203.0.113.10:443", SNI: "node.example"}).Authority(); got != "node.example" {
 		t.Fatalf("authority = %q, ожидался домен из SNI", got)
 	}
-	if got := (Entry{Addr: "localhost:8443"}).Authority(); got != "localhost:8443" {
+	if got := (Entry{Addr: "node.example:443"}).Authority(); got != "node.example" {
 		t.Fatalf("authority = %q, ожидался host из адреса", got)
 	}
 }

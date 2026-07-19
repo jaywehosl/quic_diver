@@ -390,8 +390,16 @@ func serveDecoyTCP(ctx context.Context, cfg Config, site *decoy.Site) (*http.Ser
 	tlsConf := cfg.TLS.Clone()
 	tlsConf.NextProtos = []string{"h2", "http/1.1"}
 
+	// Установка узлов живёт здесь, а не на HTTP/3-муксе: скрипт исполняется на
+	// голой машине, где есть только curl, а curl HTTP/3 не умеет.
+	tcpMux := http.NewServeMux()
+	tcpMux.Handle("/", site)
+	for path, h := range installHandlers(cfg, site) {
+		tcpMux.Handle(path, h)
+	}
+
 	srv := &http.Server{
-		Handler:           site,
+		Handler:           tcpMux,
 		TLSConfig:         tlsConf,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,

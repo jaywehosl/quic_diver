@@ -1,6 +1,8 @@
 # build
 /bin/
 /dist/
+/qd-server
+/qd-client
 *.exe
 *.dll
 *.sys
@@ -29,3 +31,8 @@ config.local.*
 
 # боевой клиент с вшитым токеном — секрет, не в git
 live-on-tests/*.exe
+
+# Локальные настройки Claude Code: в них попадают разрешённые команды, а в них —
+# админ-токены сети. У автора файл закрыт глобальным ~/.config/git/ignore, но в
+# чужом клоне такой защиты нет.
+.claude/settings.local.json

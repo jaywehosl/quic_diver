@@ -44,13 +44,13 @@ func TestBuildFilterBypassRanges(t *testing.T) {
 			netip.MustParsePrefix("10.0.0.0/8"),
 			netip.MustParsePrefix("192.168.0.0/16"),
 			netip.MustParsePrefix("fc00::/7"),
-			netip.MustParsePrefix("localhost/32"),
+			netip.MustParsePrefix("203.0.113.10/32"),
 		},
 	})
 	for _, want := range []string{
 		"(ip.DstAddr < 10.0.0.0 or ip.DstAddr > 10.255.255.255)",
 		"(ip.DstAddr < 192.168.0.0 or ip.DstAddr > 192.168.255.255)",
-		"ip.DstAddr != localhost",
+		"ip.DstAddr != 203.0.113.10",
 		"(ipv6.DstAddr < fc00:: or ipv6.DstAddr > fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff)",
 	} {
 		if !strings.Contains(got, want) {

@@ -26,7 +26,7 @@ func TestPutAndListNodes(t *testing.T) {
 	ctx := context.Background()
 	want := Node{
 		ID: "glitter.example", Label: "Германия", Category: CategoryExit,
-		Tags: []string{"de", "eu"}, Addr: "localhost:443", SNI: "glitter.example",
+		Tags: []string{"de", "eu"}, Addr: "203.0.113.10:443", SNI: "glitter.example",
 		TokenHash: auth.Hash("секрет-узла"), Enabled: true,
 	}
 	if err := s.PutNode(ctx, want); err != nil {
@@ -116,7 +116,7 @@ func TestTokenHashNotSerialised(t *testing.T) {
 
 // Имя для TLS отделено от адреса: идём на голый IP, представляясь доменом.
 func TestAuthorityPrefersSNI(t *testing.T) {
-	if got := (Node{Addr: "localhost:443", SNI: "glitter.example"}).Authority(); got != "glitter.example" {
+	if got := (Node{Addr: "203.0.113.10:443", SNI: "glitter.example"}).Authority(); got != "glitter.example" {
 		t.Fatalf("authority = %q", got)
 	}
 	if got := (Node{Addr: "glitter.example:443"}).Authority(); got != "glitter.example" {

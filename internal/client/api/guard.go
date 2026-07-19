@@ -106,14 +106,23 @@ func fromLoopback(r *http.Request) bool {
 //   - адрес: первый заход делается ссылкой, заголовок туда не положить;
 //   - печенье: браузер сам грузит стили и скрипт, ключа в тех запросах нет;
 //   - заголовок: для curl и для запросов панели, где он нагляднее.
+//
+// Порядок источников важен: адрес идёт ПЕРЕД печеньем.
+//
+// Ключ новый на каждый запуск, а печенье переживает перезапуск клиента. Если
+// печенье старше адреса, свежая ссылка не открывает панель — браузер молча
+// предъявляет вчерашний ключ и получает отказ. Наступали на это вживую.
 func tokenFrom(r *http.Request) string {
 	if v := r.Header.Get(HeaderPanelToken); v != "" {
 		return v
 	}
-	if c, err := r.Cookie(cookieName); err == nil && c.Value != "" {
+	if v := r.URL.Query().Get("token"); v != "" {
+		return v
+	}
+	if c, err := r.Cookie(cookieName); err == nil {
 		return c.Value
 	}
-	return r.URL.Query().Get("token")
+	return ""
 }
 
 func cookieHasToken(r *http.Request, tok Token) bool {

@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"quicdiver/internal/client/config"
-	"quicdiver/internal/client/service"
 )
 
 type options struct {
@@ -90,6 +89,8 @@ func main() {
 	flag.StringVar(&o.bypass, "bypass", strings.Join(cfg.Capture.Bypass, ","), "доп-префиксы в обход перехвата через запятую (напр. 1.2.3.4/32) — для отладки, чтобы не рвать свои соединения")
 	flag.StringVar(&o.rules, "rules", strings.Join(cfg.Routing.Rules, ";"), "правила роутинга через ; (напр. \"dom:youtube.com=chain;port:443=eu\"); пусто → весь трафик через выход по умолчанию")
 	flag.StringVar(&o.routeDef, "route-default", cfg.Routing.Default, "метка выхода по умолчанию (нет совпадений правил)")
+	noAuto := flag.Bool("no-autoconnect", false,
+		"поднять только сервис: панель и значок работают, трафик не заворачивается")
 	pprofAddr := flag.String("pprof", "", "адрес pprof (напр. localhost:6061); пусто → выкл")
 	flag.Parse()
 	if o.authority == "" {
@@ -130,7 +131,7 @@ func main() {
 
 	// Вшитая боевая сборка запускается двойным кликом и обязана подключаться
 	// сама: у пользователя нет ни консоли, ни (пока) панели.
-	serveService(ctx, o, cfg.Autoconnect || builtinServer != "")
+	serveService(ctx, o, cfg, !*noAuto && (cfg.Autoconnect || builtinServer != ""))
 	log.Print("остановлен")
 }
 
@@ -159,29 +160,40 @@ func entrySNI(cfg config.Config) string {
 	return cfg.Node.Entries[0].SNI
 }
 
-// serveService держит процесс живым и управляет сессией через service.Service.
+// serveService держит процесс живым: панель, значок в лотке и сессия.
 //
-// Сервис и сессия разделены: процесс работает всегда (дальше он будет отдавать
-// веб-панель), а туннель с перехватом включается отдельно. Пока панели нет,
-// сессия поднимается сразу при autoconnect — иначе клиент просто висел бы.
-func serveService(ctx context.Context, o options, autoconnect bool) {
-	svc := service.New(func(sctx context.Context) error { return run(sctx, o) }, service.DefaultBackoff())
+// Сервис и сессия разделены по ТЗ. Процесс работает всегда — отдаёт панель и
+// держит управляющую связь с узлом; перехват трафика включается отдельно,
+// кнопкой. Поэтому «отключено, узел на связи» — штатное состояние.
+func serveService(ctx context.Context, o options, cfg config.Config, autoconnect bool) {
+	ctx, quit := context.WithCancel(ctx)
+	defer quit()
+
+	rt, err := startRuntime(ctx, o, cfg, quit)
+	if err != nil {
+		log.Fatalf("панель не поднялась: %v", err)
+	}
 
 	if autoconnect {
-		if err := svc.Connect(ctx); err != nil {
+		if err := rt.svc.Connect(ctx); err != nil {
 			log.Printf("подключение: %v", err)
 		}
 	} else {
 		log.Print("сервис поднят, трафик не заворачивается (автоподключение выключено)")
 	}
+	if cfg.Panel.Open {
+		go rt.openPanel()
+	}
 
+	// Значок держит цикл сообщений и возвращается только при выходе.
+	rt.runTray(ctx)
 	<-ctx.Done()
 
 	// Гасим сессию явно и ждём уборку: она возвращает системный DNS и прокси.
 	// Уйти раньше — оставить машину с нашими настройками и без сети.
 	stopCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if err := svc.Disconnect(stopCtx); err != nil {
+	if err := rt.svc.Disconnect(stopCtx); err != nil {
 		log.Printf("остановка: %v", err)
 	}
 }

@@ -231,3 +231,28 @@ func TestWrongCookieRejected(t *testing.T) {
 		t.Fatal("чужое печенье принято")
 	}
 }
+
+// Ключ новый на каждый запуск, а печенье переживает перезапуск клиента. Свежая
+// ссылка обязана открыть панель, даже когда браузер держит вчерашнее печенье, —
+// иначе после перезапуска панель не открыть вовсе. Поймано живой проверкой.
+func TestFreshLinkBeatsStaleCookie(t *testing.T) {
+	h, reached := okHandler()
+	r := panelReq(http.MethodGet, "/?token="+hexToken, "")
+	r.AddCookie(&http.Cookie{Name: cookieName, Value: "вчерашний-ключ"})
+
+	w := httptest.NewRecorder()
+	guard(hexToken, h).ServeHTTP(w, r)
+	if !*reached {
+		t.Fatal("свежая ссылка отклонена из-за старого печенья")
+	}
+	// И печенье обновляется, иначе следующий запрос за стилями снова провалится.
+	var updated bool
+	for _, c := range w.Result().Cookies() {
+		if c.Name == cookieName && c.Value == hexToken {
+			updated = true
+		}
+	}
+	if !updated {
+		t.Fatal("печенье не перезаписано свежим ключом")
+	}
+}

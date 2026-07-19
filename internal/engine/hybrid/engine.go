@@ -38,12 +38,17 @@ const maxInboundBatch = 128
 
 // Engine — гибридный движок клиента.
 type Engine struct {
-	guard       *guard.Guard
-	rewriter    engine.Rewriter // NAT только для датаграммного (UDP) пути
-	ns          *netstack.Stack // локальный стек: терминация TCP → CONNECT-стрим
-	recvWorkers int             // потоков захвата (>1 ускоряет скачивание, но даёт reordering)
-	bufPool     sync.Pool       // буферы датаграммного пути
-	tcpPool     sync.Pool       // буферы TCP-моста; отдельный, чтобы пути не делили пул
+	guard    *guard.Guard
+	rewriter engine.Rewriter // NAT только для датаграммного (UDP) пути
+	ns       *netstack.Stack // локальный стек: терминация TCP → CONNECT-стрим
+	// verbose — печатать счётчики каждые несколько секунд.
+	//
+	// Выключено по умолчанию: в обычной работе это лента, которую никто не
+	// читает, а в журнале она вытесняет то, ради чего его открывают.
+	verbose     bool
+	recvWorkers int       // потоков захвата (>1 ускоряет скачивание, но даёт reordering)
+	bufPool     sync.Pool // буферы датаграммного пути
+	tcpPool     sync.Pool // буферы TCP-моста; отдельный, чтобы пути не делили пул
 
 	cOutRecv, cTCP, cUDP, cBypass, cWriteErr, cOversize atomic.Uint64
 	cInRecv, cInject, cInErr                            atomic.Uint64
@@ -52,7 +57,9 @@ type Engine struct {
 // New собирает движок: ns — стек с CONNECT-Dialer (TCP), rw — NAT для UDP,
 // recvWorkers — потоков захвата (1 = сохранять порядок пакетов; >1 ускоряет
 // скачивание ценой reordering и просадки отдачи).
-func New(g *guard.Guard, rw engine.Rewriter, ns *netstack.Stack, recvWorkers int) *Engine {
+// New собирает движок. verbose включает периодическую печать счётчиков —
+// нужна при отладке, в обычной работе только засоряет журнал.
+func New(g *guard.Guard, rw engine.Rewriter, ns *netstack.Stack, recvWorkers int, verbose bool) *Engine {
 	if recvWorkers < 1 {
 		recvWorkers = 1
 	}
@@ -61,6 +68,7 @@ func New(g *guard.Guard, rw engine.Rewriter, ns *netstack.Stack, recvWorkers int
 		rewriter:    rw,
 		ns:          ns,
 		recvWorkers: recvWorkers,
+		verbose:     verbose,
 		bufPool:     sync.Pool{New: func() any { return make([]byte, 65600) }},
 		tcpPool:     sync.Pool{New: func() any { return make([]byte, 65600) }},
 	}
@@ -106,7 +114,9 @@ func (e *Engine) Run(ctx context.Context, src packet.Source, tun engine.PacketTu
 		go e.pumpOutbound(ctx, src, tun, tt, errc)
 	}
 	go e.pumpInbound(ctx, src, tun, errc)
-	go e.logStats(ctx, tt)
+	if e.verbose {
+		go e.logStats(ctx, tt)
+	}
 
 	select {
 	case <-ctx.Done():

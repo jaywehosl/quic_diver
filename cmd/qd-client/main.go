@@ -23,6 +23,8 @@ import (
 )
 
 type options struct {
+	// verbose — подробный журнал: счётчики транспорта. Для отладки.
+	verbose     bool
 	server      string // UDP endpoint узла, host:port
 	authority   string // :authority в connect-ip URI (по умолчанию = server)
 	dll         string // путь к WinDivert.dll
@@ -89,6 +91,8 @@ func main() {
 	flag.StringVar(&o.bypass, "bypass", strings.Join(cfg.Capture.Bypass, ","), "доп-префиксы в обход перехвата через запятую (напр. 1.2.3.4/32) — для отладки, чтобы не рвать свои соединения")
 	flag.StringVar(&o.rules, "rules", strings.Join(cfg.Routing.Rules, ";"), "правила роутинга через ; (напр. \"dom:youtube.com=chain;port:443=eu\"); пусто → весь трафик через выход по умолчанию")
 	flag.StringVar(&o.routeDef, "route-default", cfg.Routing.Default, "метка выхода по умолчанию (нет совпадений правил)")
+	flag.BoolVar(&o.verbose, "v", false,
+		"печатать счётчики транспорта каждые несколько секунд (для отладки)")
 	noAuto := flag.Bool("no-autoconnect", false,
 		"поднять только сервис: панель и значок работают, трафик не заворачивается")
 	pprofAddr := flag.String("pprof", "", "адрес pprof (напр. localhost:6061); пусто → выкл")
@@ -108,6 +112,9 @@ func main() {
 	}
 
 	log.SetPrefix("qd-client: ")
+	// Журнал в файл: релизная сборка идёт без консоли, и без файла причина
+	// поломки просто исчезала бы.
+	defer setupLog(!hasConsole())()
 
 	// congestion выбирается внутри quic-go (наш патч читает переменную) — флаг
 	// удобнее для релиза, чем требовать env от пользователя.
@@ -131,7 +138,7 @@ func main() {
 
 	// Вшитая боевая сборка запускается двойным кликом и обязана подключаться
 	// сама: у пользователя нет ни консоли, ни (пока) панели.
-	serveService(ctx, o, cfg, !*noAuto && (cfg.Autoconnect || builtinServer != ""))
+	serveService(ctx, o, cfg, !*noAuto && cfg.Autoconnect)
 	log.Print("остановлен")
 }
 

@@ -232,7 +232,7 @@ func run(ctx context.Context, o options) error {
 		if err != nil {
 			return fmt.Errorf("netstack: %w", err)
 		}
-		eng := hybrid.New(g, rewriter, ns, o.recvWorkers)
+		eng := hybrid.New(g, rewriter, ns, o.recvWorkers, o.verbose)
 		log.Print("проксирование запущено (ГИБРИД: TCP→стрим, UDP→датаграмма)")
 		return firstErr(runEngine(ctx, eng, src, client), supErr)
 	}

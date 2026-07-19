@@ -221,12 +221,12 @@ func run(ctx context.Context, o options) error {
 		// запасом под PPPoE/VPN; -mtu задаёт явно.
 		// Выход TCP-флоу: с правилами — routeclient метит по домену (fake-IP) и
 		// подменяет fake→real; с nat46 — подмена v4→v6; иначе прямой CONNECT.
-		var dialer netstack.Dialer = connectdial.Dialer{CC: client.H3Conn()}
+		var dialer netstack.Dialer = connectdial.Dialer{CC: client.H3Conn(), Authority: o.authority}
 		switch {
 		case router != nil:
 			dialer = routeclient.Dialer{CC: client.H3Conn(), Router: router, Fake: fakePool, Default: o.routeDef, Authority: o.authority}
 		case nat46Table != nil:
-			dialer = nat46.Dialer{Inner: connectdial.Dialer{CC: client.H3Conn()}, Table: nat46Table}
+			dialer = nat46.Dialer{Inner: connectdial.Dialer{CC: client.H3Conn(), Authority: o.authority}, Table: nat46Table}
 		}
 		ns, err := netstack.NewWithMTU(dialer, o.mtu)
 		if err != nil {

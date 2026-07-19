@@ -4,7 +4,10 @@
 // Это клиентская половина гибрида: TCP-флоу терминируется локальным gVisor и
 // уезжает в CONNECT-стрим, где потери туннеля закрывает ретрансмит QUIC —
 // внутренний TCP приложения их не видит (в отличие от датаграмм connect-ip).
-// UDP по-прежнему идёт датаграммами: там ретрансмит только навредил бы.
+// UDP уезжает CONNECT-UDP потоком (RFC 9298): датаграммы внутри стрима, без
+// ретрансмита — для UDP он только навредил бы. Прежде UDP шёл сырым пакетом в
+// connect-ip датаграмме, а метка маршрута жила в src-адресе; это упиралось в
+// нарезку пула и рвало флоу при каждом изменении набора выходов.
 //
 // Реализует netstack.Dialer, поэтому серверный forwarder-код переиспользуется
 // на клиенте без изменений — меняется только способ выхода наружу.
@@ -12,7 +15,6 @@ package connectdial
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -22,11 +24,16 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go/http3"
+
+	"quicdiver/internal/transport/connectudp"
 )
 
 // Dialer открывает CONNECT-стримы через существующее H3-соединение с узлом.
 type Dialer struct {
 	CC *http3.ClientConn
+	// Authority — имя узла в :authority. Нужно UDP-потокам (RFC 9298): целевой
+	// адрес у них лежит в пути запроса, а адресуется запрос узлу.
+	Authority string
 	// Header — дополнительные заголовки CONNECT-запроса (напр. hop-limit при
 	// chain). Едут под QUIC/TLS, наружу невидимы. nil — без добавок.
 	Header http.Header
@@ -91,10 +98,14 @@ func (d Dialer) DialTCP(ctx context.Context, dst netip.AddrPort) (net.Conn, erro
 	}
 }
 
-// DialUDP не поддерживается: UDP в гибриде идёт датаграммами connect-ip, а не
-// стримами (ретрансмит для UDP вреден).
+// DialUDP открывает UDP-поток до узла (RFC 9298).
+//
+// Движок отдаёт UDP локальному стеку так же, как TCP, и стек приходит сюда. Без
+// этой реализации UDP-флоу молча упирался в отказ: пакеты уходили в стек и
+// пропадали. Снаружи это выглядело как «интернет есть, а голосовая связь
+// молчит» — TCP-приложения работали, UDP-овые нет.
 func (d Dialer) DialUDP(ctx context.Context, dst netip.AddrPort) (net.Conn, error) {
-	return nil, errors.New("connectdial: UDP идёт датаграммами, не CONNECT-стримом")
+	return connectudp.Dialer{CC: d.CC, Authority: d.Authority, Header: d.Header}.Dial(ctx, dst)
 }
 
 // streamConn — net.Conn поверх CONNECT-стрима (чтение из тела ответа, запись в

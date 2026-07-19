@@ -30,6 +30,9 @@ type Dialer struct {
 // контексте и гаснет при Close. Отдать сюда ctx запроса нельзя — вызывающий
 // (netstack.handleUDP) отменяет его сразу после дозвона, что убило бы флоу.
 func (d Dialer) Dial(ctx context.Context, dst netip.AddrPort) (net.Conn, error) {
+	if d.CC == nil {
+		return nil, errors.New("connectudp: нет соединения с узлом")
+	}
 	authority := d.Authority
 	if authority == "" {
 		return nil, errors.New("connectudp: не задан authority узла")

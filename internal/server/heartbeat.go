@@ -1,11 +1,14 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"quicdiver/internal/server/auth"
@@ -52,12 +55,43 @@ func serveHeartbeat(cfg Config) http.Handler {
 		if err := store.TouchNode(r.Context(), node.ID); err != nil {
 			log.Printf("отметка узла %s: %v", node.ID, err)
 		}
+		// Заодно принимаем отчёт о расходе клиентов. Отдельный канал заводить
+		// незачем: стук и так ходит регулярно, а без отчёта мастер видел бы
+		// только свой трафик — расход через реплики не попадал бы ни в панель,
+		// ни в лимиты.
+		if rep := decodeBeat(w, r); len(rep.Traffic) > 0 {
+			if err := store.ReportNodeTraffic(r.Context(), node.ID, rep.Traffic); err != nil {
+				log.Printf("отчёт о трафике от %s: %v", node.ID, err)
+			}
+		}
 		if state, err := store.ClusterState(r.Context()); err == nil {
 			w.Header().Set(HeaderEpoch, strconv.FormatInt(state.Epoch, 10))
 			w.Header().Set(HeaderMaster, state.MasterID)
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
+}
+
+// beatReport — что узел сообщает мастеру вместе со стуком.
+type beatReport struct {
+	// Traffic — АБСОЛЮТНЫЕ счётчики узла по клиентам. Не приращения: повторно
+	// доставленный отчёт тогда ничего не испортит, и помнить «что уже отослано»
+	// узлу не нужно — при обрыве он просто отчитается заново.
+	Traffic []db.NodeTraffic `json:"traffic,omitempty"`
+}
+
+// maxBeatBody — потолок тела стука. Клиентов на узле немного, отчёт компактный;
+// всё, что заметно больше, — не наш стук.
+const maxBeatBody = 4 << 20
+
+func decodeBeat(w http.ResponseWriter, r *http.Request) beatReport {
+	var rep beatReport
+	if r.Body == nil {
+		return rep
+	}
+	// Битое тело — не повод отказывать в отметке живости: узел жив, это главное.
+	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBeatBody)).Decode(&rep)
+	return rep
 }
 
 // Beater даёт мастеру знать, что этот узел жив.
@@ -79,6 +113,10 @@ type Beater struct {
 	closer io.Closer
 	// master — с кем сейчас держим связь; сменился мастер — рвём.
 	master string
+
+	mu sync.Mutex
+	// sent — что уже отослано мастеру, чтобы не гонять неизменившееся.
+	sent map[string][2]int64
 }
 
 // Run стучится мастеру до отмены ctx.
@@ -115,7 +153,14 @@ func (b *Beater) beat(ctx context.Context) error {
 	}
 	if state.IsMaster(b.SelfID) {
 		// Мастер отмечает себя сам: иначе он числился бы мёртвым в собственном
-		// реестре — и в панели, и для чужой балансировки.
+		// реестре — и в панели, и для чужой балансировки. Свой расход он тоже
+		// кладёт в общий разрез сам: иначе сетевой итог не учитывал бы трафик,
+		// прошедший через него самого.
+		if rows := b.report(ctx, store); len(rows) > 0 {
+			if err := store.ReportNodeTraffic(ctx, b.SelfID, rows); err != nil {
+				log.Printf("свой отчёт о трафике: %v", err)
+			}
+		}
 		return store.TouchNode(ctx, b.SelfID)
 	}
 	master, err := store.NodeByID(ctx, state.MasterID)
@@ -133,14 +178,20 @@ func (b *Beater) beat(ctx context.Context) error {
 		b.rt, b.closer, b.master = rt, closer, master.ID
 	}
 
+	body, err := json.Marshal(beatReport{Traffic: b.report(ctx, store)})
+	if err != nil {
+		return err
+	}
+
 	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(rctx, http.MethodPost,
-		"https://"+master.Authority()+HeartbeatPath, nil)
+		"https://"+master.Authority()+HeartbeatPath, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
 	req.Header.Set(auth.HeaderToken, b.SelfToken)
+	req.Header.Set("Content-Type", "application/json")
 	rsp, err := b.rt.RoundTrip(req)
 	if err != nil {
 		return err
@@ -158,6 +209,35 @@ func (b *Beater) beat(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// report собирает счётчики, изменившиеся с прошлого стука.
+//
+// Шлём только изменившееся: гонять весь список клиентов каждую минуту незачем,
+// у большинства он между ударами не двигается. Помним отосланное в памяти, а не
+// в базе: после перезапуска отчёт просто уйдёт целиком, и, поскольку значения
+// абсолютные, итог от этого не изменится.
+func (b *Beater) report(ctx context.Context, store *db.SQLite) []db.NodeTraffic {
+	rows, err := store.LocalTrafficReport(ctx)
+	if err != nil {
+		log.Printf("сбор трафика для отчёта: %v", err)
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.sent == nil {
+		b.sent = map[string][2]int64{}
+	}
+	var changed []db.NodeTraffic
+	for _, r := range rows {
+		cur := [2]int64{r.BytesIn, r.BytesOut}
+		if was, ok := b.sent[r.TokenHash]; ok && was == cur {
+			continue
+		}
+		b.sent[r.TokenHash] = cur
+		changed = append(changed, r)
+	}
+	return changed
 }
 
 // drop гасит удерживаемую связь.

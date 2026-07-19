@@ -33,6 +33,9 @@ type NodeLinks struct {
 	nodes  map[string]db.Node   // реестр, обновляется Reload
 	links  map[string]*link     // поднятые соединения
 	failed map[string]time.Time // когда последний раз не вышло подняться
+
+	// balance — выбор узла под auto:<тег> по живым метрикам.
+	balance *balancer
 }
 
 type link struct {
@@ -53,9 +56,10 @@ const linkRetryAfter = 15 * time.Second
 func NewNodeLinks(selfID, selfToken string, dial NodeDialer) *NodeLinks {
 	return &NodeLinks{
 		selfID: selfID, selfToken: selfToken, dial: dial,
-		nodes:  map[string]db.Node{},
-		links:  map[string]*link{},
-		failed: map[string]time.Time{},
+		nodes:   map[string]db.Node{},
+		links:   map[string]*link{},
+		failed:  map[string]time.Time{},
+		balance: newBalancer(),
 	}
 }
 
@@ -84,6 +88,10 @@ func (l *NodeLinks) Reload(ctx context.Context, store *db.SQLite) error {
 		if !ok || !n.Enabled || n.Addr != old.Addr || n.SNI != old.SNI {
 			ln.close()
 			delete(l.links, id)
+		}
+		if _, ok := fresh[id]; !ok {
+			// Узел вышел из сети — метрика по нему устарела навсегда.
+			l.balance.Forget(id)
 		}
 	}
 	l.nodes = fresh
@@ -172,21 +180,82 @@ func (ln *link) close() {
 
 // pickByCategory выбирает узел категории для метки auto:<тег>.
 //
-// Пока без метрик: берём первый живой подходящий. Балансировка (RTT, потери,
-// гистерезис) придёт сюда же — сигнатура не изменится.
+// Кандидатов отбирает реестр, лучшего из них — балансировщик по живым метрикам
+// (RTT, разброс, потери) с гистерезисом. Пусто означает «подходящих нет»: флоу
+// выйдет на текущем узле, а не умрёт.
 func (l *NodeLinks) pickByCategory(tag string) string {
 	l.mu.Lock()
-	defer l.mu.Unlock()
+	candidates := make([]string, 0, len(l.nodes))
 	for _, n := range l.nodes {
 		if !n.Enabled {
 			continue
 		}
 		// Тег совпал или это прямо категория (entry/exit).
 		if n.HasTag(tag) || n.Category == tag {
-			return n.ID
+			candidates = append(candidates, n.ID)
 		}
 	}
-	return ""
+	l.mu.Unlock()
+
+	return l.balance.Pick(tag, candidates)
+}
+
+// PathStatsSource — соединение, которое может рассказать о качестве пути.
+//
+// QUIC меряет RTT сам, поэтому связь с соседом — уже готовый измеритель: метрика
+// снимается с ТОГО ЖЕ пути, по которому пойдёт трафик. Синтетический пинг такого
+// не даёт, да и лишний механизм заводить незачем.
+type PathStatsSource interface {
+	Stats() (srtt, rttVar time.Duration, loss float64, ok bool)
+}
+
+// pollStats — как часто опрашивать связи.
+//
+// Совпадает с окном удержания в балансировщике: holdWindows замеров подряд и
+// составляют «устойчивое преимущество».
+const pollStats = 10 * time.Second
+
+// PollStats снимает метрики с поднятых связей до отмены ctx.
+//
+// Только с поднятых: соединение к узлу, которым никто не пользуется, держать
+// ради замеров незачем — а когда им воспользуются, метрика появится сама.
+func (l *NodeLinks) PollStats(ctx context.Context) {
+	t := time.NewTicker(pollStats)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			l.sampleOnce()
+		}
+	}
+}
+
+func (l *NodeLinks) sampleOnce() {
+	l.mu.Lock()
+	links := make(map[string]*link, len(l.links))
+	for id, ln := range l.links {
+		links[id] = ln
+	}
+	l.mu.Unlock()
+
+	for id, ln := range links {
+		src, ok := ln.closer.(PathStatsSource)
+		if !ok {
+			continue
+		}
+		srtt, rttVar, loss, ok := src.Stats()
+		if !ok {
+			continue // соединение только поднялось, образцов RTT ещё нет
+		}
+		l.balance.Observe(id, PathStats{SRTT: srtt, RTTVar: rttVar, Loss: loss})
+	}
+}
+
+// Metrics — метрики соседей и текущие выборы (для admin-API).
+func (l *NodeLinks) Metrics() ([]NodeMetric, map[string]string) {
+	return l.balance.Snapshot()
 }
 
 // linkError — понятная ошибка подъёма связи.

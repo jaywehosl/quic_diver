@@ -58,6 +58,57 @@ func TestHeartbeatMarksNodeAlive(t *testing.T) {
 	}
 }
 
+// Стук несёт отчёт о расходе клиентов: без него мастер видел бы только свой
+// трафик, и расход через реплики не попадал бы ни в панель, ни в лимиты.
+func TestHeartbeatAcceptsTrafficReport(t *testing.T) {
+	cfg, store := usersCfg(t)
+	ctx := context.Background()
+	client := auth.Hash("клиент")
+	store.PutToken(ctx, client, auth.RoleUser, "клиент")
+
+	token, _ := auth.Generate()
+	hash := auth.Hash(token)
+	store.PutNode(ctx, db.Node{ID: "peer.example", TokenHash: hash, Enabled: true})
+
+	body := `{"traffic":[{"token_hash":"` + client + `","bytes_in":700,"bytes_out":300}]}`
+	w := httptest.NewRecorder()
+	r := req(http.MethodPost, HeartbeatPath, body, auth.RoleNode)
+	auth.SessionFrom(r.Context()).Authorize(auth.RoleNode, hash)
+	serveHeartbeat(cfg).ServeHTTP(w, r)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("статус %d: %s", w.Code, w.Body)
+	}
+	total, err := store.NetworkTrafficOf(ctx, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total.BytesIn != 700 || total.BytesOut != 300 {
+		t.Fatalf("отчёт не учтён: %+v", total)
+	}
+}
+
+// Битый отчёт не должен отменять отметку живости: узел жив, это главное.
+func TestHeartbeatSurvivesBadBody(t *testing.T) {
+	cfg, store := usersCfg(t)
+	ctx := context.Background()
+	token, _ := auth.Generate()
+	hash := auth.Hash(token)
+	store.PutNode(ctx, db.Node{ID: "peer.example", TokenHash: hash, Enabled: true})
+
+	w := httptest.NewRecorder()
+	r := req(http.MethodPost, HeartbeatPath, "не json", auth.RoleNode)
+	auth.SessionFrom(r.Context()).Authorize(auth.RoleNode, hash)
+	serveHeartbeat(cfg).ServeHTTP(w, r)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("статус %d: %s", w.Code, w.Body)
+	}
+	if n, _ := store.NodeByID(ctx, "peer.example"); n.LastSeen.IsZero() {
+		t.Fatal("битое тело отменило отметку живости")
+	}
+}
+
 // Ответ несёт поколение мастера: так смена мастера доезжает за минуту, а не со
 // следующим снимком — иначе узел четверть часа ходил бы за базой не туда.
 func TestHeartbeatReportsMaster(t *testing.T) {

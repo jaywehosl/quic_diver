@@ -49,16 +49,22 @@ func adminUsers(cfg Config) http.Handler {
 
 // userView — клиент в терминах панели.
 type userView struct {
-	Hash      string       `json:"hash"` // хеш = идентификатор клиента для API
-	Label     string       `json:"label"`
-	Role      string       `json:"role"`
-	CreatedAt time.Time    `json:"created_at"`
-	Revoked   bool         `json:"revoked"`
-	ExpiresAt *time.Time   `json:"expires_at,omitempty"`
-	Limits    userLimits   `json:"limits"`
-	Traffic   db.Traffic   `json:"traffic"`
-	Devices   []db.Device  `json:"devices,omitempty"`
-	Sessions  []db.Session `json:"sessions,omitempty"`
+	Hash      string     `json:"hash"` // хеш = идентификатор клиента для API
+	Label     string     `json:"label"`
+	Role      string     `json:"role"`
+	CreatedAt time.Time  `json:"created_at"`
+	Revoked   bool       `json:"revoked"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	Limits    userLimits `json:"limits"`
+	// Traffic — расход через ЭТОТ узел.
+	Traffic db.Traffic `json:"traffic"`
+	// Network — расход по всей сети: сумма отчётов всех узлов. Локального
+	// счётчика мало — клиент ходит через разные узлы, и ни один не видит целого.
+	Network db.Traffic `json:"network_traffic"`
+	// ByNode — тот же расход в разрезе узлов: видно, где клиент ходит.
+	ByNode   []db.NodeTraffic `json:"by_node,omitempty"`
+	Devices  []db.Device      `json:"devices,omitempty"`
+	Sessions []db.Session     `json:"sessions,omitempty"`
 }
 
 type userLimits struct {
@@ -104,6 +110,12 @@ func userDetail(ctx context.Context, store *db.SQLite, hash string) (userView, e
 		return userView{}, err
 	}
 	if v.Traffic, err = store.TrafficOf(ctx, hash); err != nil {
+		return userView{}, err
+	}
+	if v.Network, err = store.NetworkTrafficOf(ctx, hash); err != nil {
+		return userView{}, err
+	}
+	if v.ByNode, err = store.NodeTrafficOf(ctx, hash); err != nil {
 		return userView{}, err
 	}
 	return v, nil

@@ -25,9 +25,11 @@ func main() {
 	srv := flag.String("server", "localhost:8443", "endpoint узла")
 	authority := flag.String("authority", "localhost:8443", "authority в connect-ip URI")
 	domain := flag.String("domain", "example.com", "домен для DNS-запроса через туннель")
+	token := flag.String("token", "", "клиентский токен (узел с БД без него не пустит)")
+	hold := flag.Duration("hold", 0, "держать туннель открытым после запроса (для проверки учёта)")
 	flag.Parse()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second+*hold)
 	defer cancel()
 
 	host, _, _ := net.SplitHostPort(*srv)
@@ -35,7 +37,7 @@ func main() {
 	tmpl := server.Template(*authority, "/connect-ip")
 
 	log.Printf("dial %s (authority %s)...", *srv, *authority)
-	client, rsp, err := cip.Dial(ctx, *srv, tmpl, tlsConf)
+	client, rsp, err := cip.DialAuth(ctx, *srv, tmpl, tlsConf, *token, "https://"+*authority+"/qd-auth")
 	if err != nil {
 		log.Fatalf("dial: %v", err)
 	}
@@ -80,6 +82,13 @@ func main() {
 		log.Printf("УСПЕХ: %s → %s (через узел в реальный интернет)", *domain, ip)
 	case <-ctx.Done():
 		log.Fatalf("таймаут: ответ из туннеля не пришёл (%v)", ctx.Err())
+	}
+
+	// Учёт трафика узел сливает в базу не на каждый пакет, а раз в интервал:
+	// туннель, закрытый сразу, до этого слива не доживёт.
+	if *hold > 0 {
+		log.Printf("держу туннель ещё %s", *hold)
+		time.Sleep(*hold)
 	}
 }
 

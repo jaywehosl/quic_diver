@@ -141,6 +141,26 @@ CREATE TABLE IF NOT EXISTS traffic (
 	bytes_out  INTEGER NOT NULL DEFAULT 0,
 	updated_at INTEGER NOT NULL
 );
+
+-- Трафик клиента В РАЗРЕЗЕ УЗЛОВ. Живёт у мастера, расходится репликой.
+--
+-- Таблица traffic выше — локальный счётчик узла: он знает только то, что прошло
+-- через него самого. Пока узел был один, этого хватало; в сети клиент ходит
+-- через разные узлы, и ни один из них не видит общего расхода — значит лимит по
+-- трафику нельзя было ни показать в панели, ни применить.
+--
+-- Узлы досылают мастеру АБСОЛЮТНЫЕ значения своих счётчиков, а не приращения:
+-- повторно доставленный отчёт тогда ничего не портит, и помнить «что уже
+-- отослано» никому не нужно. Сетевой итог — сумма по узлам.
+CREATE TABLE IF NOT EXISTS node_traffic (
+	node_id    TEXT NOT NULL,             -- какой узел отчитался
+	token_hash TEXT NOT NULL,             -- о каком клиенте
+	bytes_in   INTEGER NOT NULL DEFAULT 0,
+	bytes_out  INTEGER NOT NULL DEFAULT 0,
+	updated_at INTEGER NOT NULL,
+	PRIMARY KEY (node_id, token_hash)
+);
+CREATE INDEX IF NOT EXISTS node_traffic_token ON node_traffic(token_hash);
 `
 
 // migrations — доводка схемы на уже существующих БД. ALTER TABLE в SQLite не

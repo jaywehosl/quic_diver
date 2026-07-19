@@ -58,7 +58,11 @@ type nodeStats struct {
 	Clients clientStats `json:"clients"`
 	// Peers — соседние узлы, с которыми узел на связи. Прежнее поле outbounds
 	// (ручные выходы) ушло вместе с ними: маршрут живёт в метке трафика.
-	Peers   []string    `json:"peers,omitempty"`
+	Peers []string `json:"peers,omitempty"`
+	// Metrics — качество путей до соседей: по ним балансировщик и выбирает.
+	Metrics []NodeMetric `json:"metrics,omitempty"`
+	// Chosen — кого выбрали под каждую auto-метку прямо сейчас.
+	Chosen map[string]string `json:"chosen,omitempty"`
 }
 
 type goStats struct {
@@ -119,6 +123,7 @@ func adminStats(cfg Config) http.Handler {
 				st.Peers = append(st.Peers, n.ID)
 			}
 			sort.Strings(st.Peers)
+			st.Metrics, st.Chosen = cfg.Links.Metrics()
 		}
 		if store, ok := sqliteOf(cfg.Store); ok {
 			st.Clients = clientSnapshot(r.Context(), store)

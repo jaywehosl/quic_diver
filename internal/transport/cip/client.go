@@ -20,6 +20,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"time"
 
 	connectip "github.com/quic-go/connect-ip-go"
 	"github.com/quic-go/quic-go/http3"
@@ -181,6 +182,29 @@ func (l *Link) H3Conn() *http3.ClientConn { return l.cc }
 
 // Context закрывается со смертью QUIC-сессии.
 func (l *Link) Context() context.Context { return l.qc.QUIC().Context() }
+
+// Stats — качество пути до соседа: сглаженный RTT, его разброс и доля потерь.
+//
+// Отдельного механизма замеров не нужно: QUIC меряет RTT сам по каждому
+// подтверждённому пакету, а соединение с соседом мы и так держим. Значит метрика
+// снимается с ТОГО ЖЕ пути, по которому пойдёт трафик, — синтетический пинг
+// такого не даёт.
+//
+// Разброс отдаётся отдельно от среднего намеренно: узел со стабильными 30 мс
+// лучше узла с 20±40 мс, а по одному среднему они неразличимы.
+//
+// ok=false означает «замерять пока не по чему»: соединение только поднялось и
+// образцов RTT ещё нет.
+func (l *Link) Stats() (srtt, rttVar time.Duration, loss float64, ok bool) {
+	st := l.qc.QUIC().ConnectionStats()
+	if st.SmoothedRTT <= 0 {
+		return 0, 0, 0, false
+	}
+	if st.PacketsSent > 0 {
+		loss = float64(st.PacketsLost) / float64(st.PacketsSent)
+	}
+	return st.SmoothedRTT, st.MeanDeviation, loss, true
+}
 
 // Close гасит соединение.
 func (l *Link) Close() error {

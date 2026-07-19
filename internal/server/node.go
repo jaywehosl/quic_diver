@@ -416,6 +416,11 @@ func authorize(ctx context.Context, cfg Config, sess *auth.Session, token string
 	}
 	hash := auth.Hash(token)
 	if info, err := cfg.Store.Lookup(ctx, hash); err == nil {
+		// Квота — только клиентам. Админа и узел лимитом трафика не глушим:
+		// потерять управление сетью из-за израсходованного тарифа нельзя.
+		if info.Role == auth.RoleUser && quotaExceeded(ctx, cfg, hash) {
+			return false
+		}
 		sess.Authorize(info.Role, hash)
 		return true
 	}
@@ -433,6 +438,36 @@ func authorize(ctx context.Context, cfg Config, sess *auth.Session, token string
 		}
 	}
 	return false // нет токена, отозван или ошибка БД — не пускаем
+}
+
+// quotaExceeded — израсходовал ли клиент лимит трафика.
+//
+// Считается по СЕТЕВОМУ расходу: локального счётчика узла мало, клиент ходит
+// через разные узлы. На реплике сетевой итог отстаёт на интервал репликации,
+// поэтому перерасход замечается с задержкой — это осознанный размен: гонять
+// каждую проверку до мастера значило бы уронить авторизацию вместе со связью с
+// ним.
+//
+// Ошибку подсчёта трактуем в пользу клиента: не пустить из-за сбоя базы хуже,
+// чем отдать лишний трафик.
+func quotaExceeded(ctx context.Context, cfg Config, hash string) bool {
+	store, ok := sqliteOf(cfg.Store)
+	if !ok {
+		return false
+	}
+	q, err := store.QuotaOf(ctx, hash)
+	if err != nil {
+		log.Printf("проверка квоты: %v", err)
+		return false
+	}
+	if !q.Exceeded() {
+		return false
+	}
+	// СОБЫТИЕ ДЛЯ АЛЕРТА: клиент упёрся в лимит. Без записи это выглядело бы
+	// для него как «перестало работать без причины».
+	log.Printf("клиент %s… израсходовал лимит трафика (%d из %d)",
+		hash[:12], q.Used, q.Limit)
+	return true
 }
 
 // sessionAllowed — доверенная ли текущая сессия. Если Store не задан (dev-режим,

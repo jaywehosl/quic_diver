@@ -22,13 +22,17 @@ type TokenRow struct {
 	Revoked       bool
 	LimitDevices  int
 	LimitSessions int
+	// LimitTraffic — предел трафика за период, байт. 0 — без ограничения.
+	LimitTraffic int64
+	// TrafficPeriod — длина периода в днях. 0 — лимит разовый.
+	TrafficPeriod int
 	ExpiresAt     time.Time // нулевое — бессрочно
 }
 
 // ListTokens — все токены узла, свежие сверху.
 func (s *SQLite) ListTokens(ctx context.Context) ([]TokenRow, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT hash, role, label, created_at, revoked, limit_devices, limit_sessions, expires_at
+		`SELECT hash, role, label, created_at, revoked, limit_devices, limit_sessions, expires_at, limit_traffic, traffic_period
 		 FROM tokens ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("db: токены: %w", err)
@@ -49,7 +53,7 @@ func (s *SQLite) ListTokens(ctx context.Context) ([]TokenRow, error) {
 // TokenRowByHash — один токен со всеми полями.
 func (s *SQLite) TokenRowByHash(ctx context.Context, hash string) (TokenRow, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT hash, role, label, created_at, revoked, limit_devices, limit_sessions, expires_at
+		`SELECT hash, role, label, created_at, revoked, limit_devices, limit_sessions, expires_at, limit_traffic, traffic_period
 		 FROM tokens WHERE hash = ?`, hash)
 	t, err := scanToken(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -67,7 +71,8 @@ func scanToken(sc scanner) (TokenRow, error) {
 	var created, expires int64
 	var revoked int
 	if err := sc.Scan(&t.Hash, &role, &t.Label, &created, &revoked,
-		&t.LimitDevices, &t.LimitSessions, &expires); err != nil {
+		&t.LimitDevices, &t.LimitSessions, &expires,
+		&t.LimitTraffic, &t.TrafficPeriod); err != nil {
 		return TokenRow{}, err
 	}
 	t.Role, t.Revoked, t.CreatedAt = auth.Role(role), revoked != 0, time.Unix(0, created)

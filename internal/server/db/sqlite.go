@@ -173,6 +173,19 @@ var migrations = []string{
 	`ALTER TABLE tokens ADD COLUMN limit_sessions INTEGER NOT NULL DEFAULT 0`,
 	// До какого момента токен действителен (unix-наносекунды, 0 — бессрочно).
 	`ALTER TABLE tokens ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0`,
+	// Предел трафика за период, байт. 0 — без ограничения.
+	`ALTER TABLE tokens ADD COLUMN limit_traffic INTEGER NOT NULL DEFAULT 0`,
+	// Длина периода в днях (30 — месячный тариф). 0 — период не кончается,
+	// лимит разовый.
+	`ALTER TABLE tokens ADD COLUMN traffic_period INTEGER NOT NULL DEFAULT 0`,
+	// Когда period закончится и счётчик начнётся заново (unix-наносекунды).
+	`ALTER TABLE tokens ADD COLUMN traffic_reset_at INTEGER NOT NULL DEFAULT 0`,
+	// Сколько было прокачано на начало периода.
+	//
+	// Обнулять сам счётчик нельзя: узлы досылают АБСОЛЮТНЫЕ значения, и
+	// следующий же отчёт вернул бы стёртое обратно. Поэтому расход за период
+	// считается как «итог минус база», а сброс периода двигает базу.
+	`ALTER TABLE tokens ADD COLUMN traffic_base INTEGER NOT NULL DEFAULT 0`,
 }
 
 // Open открывает (создаёт) БД по пути и накатывает схему.

@@ -62,9 +62,11 @@ type userView struct {
 	// счётчика мало — клиент ходит через разные узлы, и ни один не видит целого.
 	Network db.Traffic `json:"network_traffic"`
 	// ByNode — тот же расход в разрезе узлов: видно, где клиент ходит.
-	ByNode   []db.NodeTraffic `json:"by_node,omitempty"`
-	Devices  []db.Device      `json:"devices,omitempty"`
-	Sessions []db.Session     `json:"sessions,omitempty"`
+	ByNode []db.NodeTraffic `json:"by_node,omitempty"`
+	// Quota — лимит трафика и расход за текущий период.
+	Quota    db.Quota     `json:"quota"`
+	Devices  []db.Device  `json:"devices,omitempty"`
+	Sessions []db.Session `json:"sessions,omitempty"`
 }
 
 type userLimits struct {
@@ -116,6 +118,9 @@ func userDetail(ctx context.Context, store *db.SQLite, hash string) (userView, e
 		return userView{}, err
 	}
 	if v.ByNode, err = store.NodeTrafficOf(ctx, hash); err != nil {
+		return userView{}, err
+	}
+	if v.Quota, err = store.QuotaOf(ctx, hash); err != nil {
 		return userView{}, err
 	}
 	return v, nil
@@ -190,6 +195,13 @@ type patchReq struct {
 	LimitDevices  *int    `json:"limit_devices,omitempty"`
 	LimitSessions *int    `json:"limit_sessions,omitempty"`
 	ExpiresInDays *int    `json:"expires_in_days,omitempty"` // 0 — снять срок
+	// LimitTrafficGB — предел трафика за период, ГБ. 0 — снять ограничение.
+	LimitTrafficGB *float64 `json:"limit_traffic_gb,omitempty"`
+	// TrafficPeriodDays — длина периода. 0 — лимит разовый, без сброса.
+	TrafficPeriodDays *int `json:"traffic_period_days,omitempty"`
+	// ResetTraffic — начать период заново прямо сейчас (клиент продлил тариф
+	// посреди периода — ждать автосброса неправильно).
+	ResetTraffic bool `json:"reset_traffic,omitempty"`
 	// Device — отзыв/возврат конкретного устройства клиента.
 	Device        string `json:"device,omitempty"`
 	DeviceRevoked *bool  `json:"device_revoked,omitempty"`
@@ -218,6 +230,25 @@ func patchUser(w http.ResponseWriter, r *http.Request, store *db.SQLite) {
 	}
 	if req.Label != nil {
 		if err := store.PutToken(ctx, req.Hash, cur.Role, *req.Label); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	if req.LimitTrafficGB != nil || req.TrafficPeriodDays != nil {
+		limit, days := cur.LimitTraffic, cur.TrafficPeriod
+		if req.LimitTrafficGB != nil {
+			limit = int64(*req.LimitTrafficGB * (1 << 30))
+		}
+		if req.TrafficPeriodDays != nil {
+			days = *req.TrafficPeriodDays
+		}
+		if err := store.SetTrafficLimit(ctx, req.Hash, limit, days); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	if req.ResetTraffic {
+		if err := store.ResetTraffic(ctx, req.Hash); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

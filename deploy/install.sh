@@ -175,7 +175,7 @@ Type=simple
 User=root
 WorkingDirectory=$INSTALL_DIR
 EnvironmentFile=$INSTALL_DIR/.env
-ExecStart=$INSTALL_DIR/qd-server -domain $DOMAIN -db $INSTALL_DIR/db/node.db -tls-cert /etc/letsencrypt/live/$DOMAIN/fullchain.pem -tls-key /etc/letsencrypt/live/$DOMAIN/privkey.pem
+ExecStart=$INSTALL_DIR/qd-server -listen :443 -authority $DOMAIN:443 -cert /etc/letsencrypt/live/$DOMAIN/fullchain.pem -key /etc/letsencrypt/live/$DOMAIN/privkey.pem -db $INSTALL_DIR/db/node.db -dns udp://$PRIMARY_DNS:53
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
@@ -187,32 +187,47 @@ EOF
 systemctl daemon-reload
 systemctl enable qd-server
 
-# 11. Инициализация первичного Админ Токена (если Master)
+# 11. Инициализация первичного Админ Токена и Бандла подписки (если Master)
 ADMIN_TOKEN=""
+CLIENT_LINK=""
 if [[ "$ROLE" == "master" ]]; then
-    log_info "Инициализация административных токенов в БД..."
-    systemctl start qd-server || true
-    sleep 2
-    # Генерируем админ токен через qd-server
-    ADMIN_TOKEN=$("$INSTALL_DIR/qd-server" -gen-token -role admin || echo "qd_admin_master_secret_token_12345")
+    log_info "Инициализация административных токенов и подписки в БД..."
+    GEN_OUTPUT=$("$INSTALL_DIR/qd-server" -db "$INSTALL_DIR/db/node.db" -authority "$DOMAIN:443" -gen-admin-token 2>/dev/null || echo "")
+    ADMIN_TOKEN=$(echo "$GEN_OUTPUT" | grep "ADMIN_TOKEN=" | cut -d= -f2)
+    CLIENT_LINK=$(echo "$GEN_OUTPUT" | grep "CLIENT_LINK=" | cut -d= -f2)
 fi
 
 systemctl restart qd-server
-log_ok "Служба qd-server успешно запущена!"
+sleep 1
+
+if systemctl is-active --quiet qd-server; then
+    log_ok "Служба qd-server успешно запущена и работает!"
+else
+    log_error "Служба qd-server не смогла стартовать. Лог службы (journalctl -u qd-server):"
+    journalctl -u qd-server --no-pager -n 25
+    exit 1
+fi
 
 echo -e "${COLOR_GREEN}"
 echo "================================================================="
 echo "        Установка QUIC Diver Server успешно завершена!          "
 echo "================================================================="
 echo -e "${COLOR_RESET}"
-echo -e "Домен ноды:      ${COLOR_CYAN}$DOMAIN${COLOR_RESET}"
-echo -e "Роль:            ${COLOR_CYAN}$ROLE${COLOR_RESET}"
-echo -e "Primary DNS:     ${COLOR_CYAN}$PRIMARY_DNS${COLOR_RESET}"
-echo -e "Secondary DNS:   ${COLOR_CYAN}$SECONDARY_DNS${COLOR_RESET}"
-echo -e "NAT46 (FakeIPv6):${COLOR_CYAN}$ENABLE_NAT46${COLOR_RESET}"
+echo -e "Домен ноды:          ${COLOR_CYAN}$DOMAIN${COLOR_RESET}"
+echo -e "Роль:                ${COLOR_CYAN}$ROLE${COLOR_RESET}"
+echo -e "Primary DNS:         ${COLOR_CYAN}$PRIMARY_DNS${COLOR_RESET}"
+echo -e "Secondary DNS:       ${COLOR_CYAN}$SECONDARY_DNS${COLOR_RESET}"
+echo -e "NAT46 (FakeIPv6):    ${COLOR_CYAN}$ENABLE_NAT46${COLOR_RESET}"
 
 if [[ -n "$ADMIN_TOKEN" ]]; then
-    echo -e "Админ Токен:    ${COLOR_YELLOW}$ADMIN_TOKEN${COLOR_RESET}"
-    echo -e "Ссылка подключения:${COLOR_GREEN}qd://$ADMIN_TOKEN@$DOMAIN:443${COLOR_RESET}"
+    echo ""
+    echo -e "🔑 ${COLOR_YELLOW}Админ Токен (для входа в управление сетью):${COLOR_RESET}"
+    echo -e "   ${COLOR_YELLOW}$ADMIN_TOKEN${COLOR_RESET}"
 fi
-EOF
+
+if [[ -n "$CLIENT_LINK" ]]; then
+    echo ""
+    echo -e "🚀 ${COLOR_GREEN}Ссылка подписки для клиента (вставьте в поле 'Подключить сеть'):${COLOR_RESET}"
+    echo -e "   ${COLOR_GREEN}$CLIENT_LINK${COLOR_RESET}"
+    echo ""
+fi

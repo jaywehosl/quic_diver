@@ -20,10 +20,12 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"strings"
 	"time"
 
 	connectip "github.com/quic-go/connect-ip-go"
 
+	"quicdiver/internal/client/config"
 	"quicdiver/internal/server"
 	"quicdiver/internal/server/auth"
 	"quicdiver/internal/server/chain"
@@ -33,12 +35,22 @@ import (
 	"quicdiver/internal/transport/cip"
 )
 
+func envOrDefault(key, def string) string {
+	if val := os.Getenv(key); val != "" {
+		return val
+	}
+	return def
+}
+
 func main() {
 	listen := flag.String("listen", ":8443", "UDP-адрес прослушивания QUIC")
 	authority := flag.String("authority", "localhost:8443", "host:port в connect-ip URI (совпадает с клиентом)")
+	domainAlias := flag.String("domain", "", "псевдоним для -authority")
 	assign := flag.String("assign", "10.7.0.2/32", "адрес, назначаемый клиенту")
 	certFile := flag.String("cert", "", "TLS cert (PEM); пусто → self-signed dev")
+	tlsCertAlias := flag.String("tls-cert", "", "псевдоним для -cert")
 	keyFile := flag.String("key", "", "TLS key (PEM)")
+	tlsKeyAlias := flag.String("tls-key", "", "псевдоним для -key")
 	pprofAddr := flag.String("pprof", "", "адрес pprof (напр. localhost:6060); пусто → выкл")
 	dnsUpstream := flag.String("dns", "https://dns.google/dns-query",
 		"upstream DNS узла: https://... (DoH), tls://host:853 (DoT) или udp://host:53 (plain)")
@@ -59,10 +71,52 @@ func main() {
 	replicaEvery := flag.Duration("replica-every", 15*time.Minute,
 		"как часто реплика забирает базу у мастера (0 — не реплицировать)")
 	addUser := flag.Bool("add-user", false, "сгенерировать клиентский токен, записать в БД и выйти (нужен -db)")
+	genAdminToken := flag.Bool("gen-admin-token", false, "сгенерировать админ-токен и клиентскую ссылку подписки, записать в БД и выйти")
+	genTokenAlias := flag.Bool("gen-token", false, "псевдоним для -gen-admin-token")
 	userLabel := flag.String("label", "", "имя клиента для -add-user")
 	flag.Parse()
 
 	log.SetPrefix("qd-server: ")
+
+	// Применение псевдонимов и переменных окружения
+	if *domainAlias != "" {
+		*authority = *domainAlias
+		if !strings.Contains(*authority, ":") {
+			*authority = *authority + ":443"
+		}
+	} else if envDom := os.Getenv("DOMAIN"); envDom != "" && *authority == "localhost:8443" {
+		*authority = envDom
+		if !strings.Contains(*authority, ":") {
+			*authority = *authority + ":443"
+		}
+	}
+
+	if *tlsCertAlias != "" {
+		*certFile = *tlsCertAlias
+	} else if envCert := os.Getenv("CERT_FILE"); envCert != "" && *certFile == "" {
+		*certFile = envCert
+	}
+
+	if *tlsKeyAlias != "" {
+		*keyFile = *tlsKeyAlias
+	} else if envKey := os.Getenv("KEY_FILE"); envKey != "" && *keyFile == "" {
+		*keyFile = envKey
+	}
+
+	if envDB := os.Getenv("DB_PATH"); envDB != "" && *dbPath == "" {
+		*dbPath = envDB
+	}
+
+	if envPrimDNS := os.Getenv("PRIMARY_DNS"); envPrimDNS != "" && *dnsUpstream == "https://dns.google/dns-query" {
+		*dnsUpstream = "udp://" + envPrimDNS + ":53"
+	}
+
+	if *genAdminToken || *genTokenAlias {
+		if err := cmdGenAdminToken(*dbPath, *authority); err != nil {
+			log.Fatalf("gen-admin-token: %v", err)
+		}
+		return
+	}
 
 	// Управляющие команды (генерация токенов) — заготовка кнопок будущей панели.
 	if *addUser {
@@ -325,6 +379,49 @@ func seedNetworkToken(store *db.SQLite, token string, role auth.Role) {
 	if err := store.PutToken(context.Background(), auth.Hash(token), role, string(role)+"-сети"); err != nil {
 		log.Fatalf("seed %s: %v", role, err)
 	}
+}
+
+func cmdGenAdminToken(dbPath, authority string) error {
+	if dbPath == "" {
+		return fmt.Errorf("нужен -db")
+	}
+	store, err := db.Open(dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	adminToken, err := auth.Generate()
+	if err != nil {
+		return err
+	}
+	userToken, err := auth.Generate()
+	if err != nil {
+		return err
+	}
+
+	_ = store.PutToken(ctx, auth.Hash(adminToken), auth.RoleAdmin, "Главный администратор")
+	_ = store.PutToken(ctx, auth.Hash(userToken), auth.RoleUser, "Первичный клиент")
+
+	if authority == "" || authority == "localhost:8443" {
+		authority = "localhost:443"
+	}
+	addr := authority
+	if !strings.Contains(addr, ":") {
+		addr += ":443"
+	}
+
+	bundle := config.Bundle{
+		V: 1,
+		T: userToken,
+		E: []config.BundleEntry{{A: addr}},
+		N: "QUIC Diver Network",
+	}
+
+	fmt.Printf("ADMIN_TOKEN=%s\n", adminToken)
+	fmt.Printf("CLIENT_LINK=%s\n", bundle.String())
+	return nil
 }
 
 // cmdAddUser генерирует клиентский токен, пишет его хеш в БД и печатает открытый

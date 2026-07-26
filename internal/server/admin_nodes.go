@@ -152,7 +152,7 @@ func installCommand(cfg Config, id, token string) string {
 		masterURL = "https://" + masterURL
 	}
 	return fmt.Sprintf(
-		`curl -sSL https://raw.githubusercontent.com/jaywehosl/quic_diver/main/deploy/install.sh | bash -s -- --role=worker --master="%s" --node-token="%s" --domain="%s"`,
+		`bash <(curl -sSL https://raw.githubusercontent.com/jaywehosl/quic_diver/main/deploy/install.sh) --role=worker --master="%s" --node-token="%s" --domain="%s"`,
 		masterURL, token, id,
 	)
 }

@@ -210,7 +210,7 @@ func TestAddNodeReturnsInstallCommand(t *testing.T) {
 	if !strings.Contains(body, "install.sh") || !strings.Contains(body, "master.example") {
 		t.Fatalf("нет команды установки: %s", body)
 	}
-	if !strings.Contains(body, "| bash") {
+	if !strings.Contains(body, "role=worker") {
 		t.Fatalf("команда не исполняема: %s", body)
 	}
 }

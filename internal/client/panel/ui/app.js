@@ -6,8 +6,11 @@
 
 // Ключ панели приходит в адресе один раз, дальше носим его в заголовке и
 // вычищаем из строки адреса — чтобы не осел в истории браузера.
-const TOKEN = new URLSearchParams(location.search).get('token') || '';
-if (TOKEN) history.replaceState(null, '', location.pathname + location.hash);
+let TOKEN = new URLSearchParams(location.search).get('token') || localStorage.getItem('qd_panel_token') || '';
+if (new URLSearchParams(location.search).get('token')) {
+  localStorage.setItem('qd_panel_token', TOKEN);
+  history.replaceState(null, '', location.pathname + location.hash);
+}
 
 const $ = (id) => document.getElementById(id);
 
@@ -145,6 +148,16 @@ async function loadConfig() {
   $('manageDNS').checked = !!cap.manage_dns;
   $('manageProxy').checked = !!cap.manage_proxy;
   $('nat46').value = cap.nat46 || 'auto';
+
+  const tr = cfg.transport || {};
+  $('brutalMbps').value = tr.brutal_mbps || 700;
+  $('autoConnect').checked = !!cfg.autoconnect;
+  $('autoStart').checked = !!cfg.autostart;
+
+  const logCfg = cfg.logging || {};
+  $('logEnabled').checked = !!logCfg.enabled;
+  $('logMaxMB').value = logCfg.max_mb || 1;
+  $('logLevel').value = logCfg.level || 'info';
 }
 
 function renderEntries(entries) {
@@ -206,6 +219,16 @@ $('btnSaveNode').onclick = () => saveConfig((c) => {
   c.capture.manage_dns = $('manageDNS').checked;
   c.capture.manage_proxy = $('manageProxy').checked;
   c.capture.nat46 = $('nat46').value;
+
+  c.transport = c.transport || {};
+  c.transport.brutal_mbps = parseInt($('brutalMbps').value, 10) || 700;
+  c.autoconnect = $('autoConnect').checked;
+  c.autostart = $('autoStart').checked;
+
+  c.logging = c.logging || {};
+  c.logging.enabled = $('logEnabled').checked;
+  c.logging.max_mb = parseInt($('logMaxMB').value, 10) || 1;
+  c.logging.level = $('logLevel').value || 'info';
 }, $('nodeMsg'));
 
 // --- проверка правила ---
@@ -290,17 +313,24 @@ $('btnClearNotices').onclick = async () => { await api('/api/notifications', { b
 
 // --- управление сетью ---
 
-let adminToken = '';
+let adminToken = localStorage.getItem('qd_admin_token') || '';
+
+if (adminToken) {
+  $('adminToken').value = adminToken;
+  setTimeout(() => { $('btnAdminLoad').click(); }, 150);
+}
 
 $('btnAdminLoad').onclick = async () => {
   adminToken = $('adminToken').value.trim();
   if (!adminToken) return;
   try {
     await api('/api/node/qd-admin/cluster', { admin: adminToken });
+    localStorage.setItem('qd_admin_token', adminToken);
     $('adminBody').hidden = false;
     say($('adminMsg'), 'токен принят', 'ok');
     adminView('nodes');
   } catch (e) {
+    localStorage.removeItem('qd_admin_token');
     $('adminBody').hidden = true;
     say($('adminMsg'), e.message, 'err');
   }

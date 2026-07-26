@@ -8,6 +8,10 @@
 package sysproxy
 
 import (
+	"encoding/json"
+	"log"
+	"os"
+	"path/filepath"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -26,17 +30,18 @@ const (
 	internetOptionRefresh         = 37
 )
 
-// notifyChange уведомляет WinINET о смене настроек, чтобы приложения подхватили
-// их без перезапуска.
-//
-// Уведомление повторяется: браузеры перечитывают настройки не мгновенно, а
-// пришедшее в момент собственного старта могут и пропустить. Тогда приложение
-// продолжает ходить через прокси, которого в системе уже нет, — со стороны это
-// выглядит как «клиент подключён, а адрес прежний». Повтор стоит трёх вызовов
-// и снимает большую часть таких случаев.
-//
-// Чего он не лечит: уже открытые соединения. Держащий keep-alive к прокси
-// браузер доживёт на нём до закрытия вкладки, сколько его ни уведомляй.
+func stashPath() (string, error) {
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		dir = os.TempDir()
+	}
+	appDir := filepath.Join(dir, "quicdiver")
+	if err := os.MkdirAll(appDir, 0755); err != nil {
+		return "", err
+	}
+	return filepath.Join(appDir, "sysproxy_stash.json"), nil
+}
+
 func notifyChange() {
 	go func() {
 		for _, pause := range []time.Duration{0, 300 * time.Millisecond, time.Second} {
@@ -51,9 +56,41 @@ func notifyChange() {
 
 // Saved — сохранённое состояние прокси для восстановления.
 type Saved struct {
-	hadEnable bool
-	enable    uint32
-	server    string
+	HadEnable uint32 `json:"had_enable"`
+	Enable    uint32 `json:"enable"`
+	Server    string `json:"server"`
+	Override  string `json:"override"`
+	HadServer bool   `json:"had_server"`
+}
+
+func (s *Saved) saveStash() error {
+	path, err := stashPath()
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(s)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0600)
+}
+
+// EnsureRestored проверяет дисковый стэш от предыдущего аварийного вылета и восстанавливает прокси.
+func EnsureRestored() {
+	path, err := stashPath()
+	if err != nil {
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var s Saved
+	if err := json.Unmarshal(data, &s); err == nil {
+		log.Printf("sysproxy: найден стэш от предыдущего сеанса, восстанавливаем системный прокси...")
+		_ = s.Restore()
+	}
+	_ = os.Remove(path)
 }
 
 // Current читает текущее состояние прокси (без изменения).
@@ -70,8 +107,11 @@ func Current() (enabled bool, server string, err error) {
 	return enabled, server, nil
 }
 
-// Disable отключает системный прокси, вернув состояние для последующего Restore.
+// Disable отключает системный прокси, сохраняя состояние в стэш для последующего Restore.
 func Disable() (*Saved, error) {
+	// Сначала проверяем/подбираем прошлый незакрытый стэш
+	EnsureRestored()
+
 	k, err := registry.OpenKey(registry.CURRENT_USER, keyPath, registry.QUERY_VALUE|registry.SET_VALUE)
 	if err != nil {
 		return nil, err
@@ -80,10 +120,16 @@ func Disable() (*Saved, error) {
 
 	s := &Saved{}
 	if v, _, err := k.GetIntegerValue("ProxyEnable"); err == nil {
-		s.enable = uint32(v)
-		s.hadEnable = true
+		s.Enable = uint32(v)
+		s.HadEnable = 1
 	}
-	s.server, _, _ = k.GetStringValue("ProxyServer")
+	if srv, _, err := k.GetStringValue("ProxyServer"); err == nil {
+		s.Server = srv
+		s.HadServer = true
+	}
+	s.Override, _, _ = k.GetStringValue("ProxyOverride")
+
+	_ = s.saveStash()
 
 	if err := k.SetDWordValue("ProxyEnable", 0); err != nil {
 		return nil, err
@@ -92,7 +138,7 @@ func Disable() (*Saved, error) {
 	return s, nil
 }
 
-// Restore возвращает системный прокси в исходное состояние.
+// Restore возвращает системный прокси в исходное состояние и чистит стэш.
 func (s *Saved) Restore() error {
 	if s == nil {
 		return nil
@@ -103,11 +149,20 @@ func (s *Saved) Restore() error {
 	}
 	defer k.Close()
 
-	if s.hadEnable {
-		if err := k.SetDWordValue("ProxyEnable", s.enable); err != nil {
-			return err
-		}
+	if s.HadEnable != 0 {
+		_ = k.SetDWordValue("ProxyEnable", s.Enable)
 	}
+	if s.HadServer && s.Server != "" {
+		_ = k.SetStringValue("ProxyServer", s.Server)
+	}
+	if s.Override != "" {
+		_ = k.SetStringValue("ProxyOverride", s.Override)
+	}
+
+	if path, err := stashPath(); err == nil {
+		_ = os.Remove(path)
+	}
+
 	notifyChange()
 	return nil
 }

@@ -243,6 +243,10 @@ func Run(ctx context.Context, cfg Config) error {
 		mux.Handle(cfg.SubscriptionPath, serveSubscription(cfg, site))
 		log.Printf("подписка клиенту на %s", cfg.SubscriptionPath)
 	}
+	if cfg.Store != nil {
+		mux.Handle(ClientConfigBackupPath, serveClientConfigBackup(cfg, site))
+		log.Printf("бэкап настроек клиента на %s", ClientConfigBackupPath)
+	}
 	// Авторизация сессии: клиент предъявляет токен ДО connect-ip. Проверяем один
 	// раз на QUIC-сессию — connect-ip и все CONNECT-стримы идут по ней же и
 	// наследуют доверие. Нет/битый токен → decoy (не 401 — не выдавать себя).
@@ -569,15 +573,17 @@ func serveConnect(w http.ResponseWriter, r *http.Request, cfg Config) {
 		f.Flush() // отдать 200 сразу, не дожидаясь данных
 	}
 
-	done := make(chan struct{})
-	go func() {
-		_, _ = io.Copy(out, r.Body) // клиент → внешний хост
-		if cw, ok := out.(interface{ CloseWrite() error }); ok {
-			_ = cw.CloseWrite()
-		}
-		close(done)
-	}()
-	_, _ = io.Copy(flushWriter{w}, out) // внешний хост → клиент
+	done := make(chan struct{}, 2)
+	cp := func(dst io.Writer, src io.Reader) {
+		_, _ = io.Copy(dst, src)
+		done <- struct{}{}
+	}
+
+	go cp(out, r.Body)           // клиент → внешний хост
+	go cp(flushWriter{w}, out)  // внешний хост → клиент
+
+	<-done
+	_ = out.Close() // принудительное закрытие выбивает оставшуюся горутину из Read
 	<-done
 }
 

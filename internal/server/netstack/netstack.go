@@ -282,24 +282,20 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 	go pipe(inbound, outbound)
 }
 
-// pipe качает данные в обе стороны и корректно закрывает половинки.
+// pipe качает данные в обе стороны и мгновенно закрывает сокеты при обрыве одной из сторон.
 func pipe(a, b net.Conn) {
 	done := make(chan struct{}, 2)
 	cp := func(dst, src net.Conn) {
 		_, _ = io.Copy(dst, src)
-		if cw, ok := dst.(interface{ CloseWrite() error }); ok {
-			_ = cw.CloseWrite()
-		} else {
-			_ = dst.Close()
-		}
 		done <- struct{}{}
 	}
 	go cp(a, b)
 	go cp(b, a)
+
 	<-done
+	_ = a.Close()
+	_ = b.Close()
 	<-done
-	a.Close()
-	b.Close()
 }
 
 func toNetip(a tcpip.Address) netip.Addr {

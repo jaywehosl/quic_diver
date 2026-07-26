@@ -301,3 +301,33 @@ func TestAllocateReusesFreed(t *testing.T) {
 		t.Fatalf("выдан %v, ожидался переиспользованный %v", a2, a1)
 	}
 }
+
+func TestClientConfigBackup(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	hash := auth.Hash(mustToken(t))
+	_ = s.PutToken(ctx, hash, auth.RoleUser, "test-user")
+
+	// 1. Бэкап пока не существует
+	if _, _, err := s.GetClientConfig(ctx, hash); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("ожидался ErrNotFound, получено %v", err)
+	}
+
+	// 2. Добавляем бэкап
+	cfgJSON := `{"routing":{"rules":["geosite:google=node1"]}}`
+	if err := s.PutClientConfig(ctx, hash, cfgJSON); err != nil {
+		t.Fatalf("PutClientConfig: %v", err)
+	}
+
+	// 3. Считываем бэкап
+	gotJSON, updated, err := s.GetClientConfig(ctx, hash)
+	if err != nil {
+		t.Fatalf("GetClientConfig: %v", err)
+	}
+	if gotJSON != cfgJSON {
+		t.Fatalf("получено %q, ожидалось %q", gotJSON, cfgJSON)
+	}
+	if updated.IsZero() {
+		t.Fatal("updated_at не должен быть нулевым")
+	}
+}

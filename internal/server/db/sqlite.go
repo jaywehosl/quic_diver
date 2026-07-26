@@ -161,6 +161,13 @@ CREATE TABLE IF NOT EXISTS node_traffic (
 	PRIMARY KEY (node_id, token_hash)
 );
 CREATE INDEX IF NOT EXISTS node_traffic_token ON node_traffic(token_hash);
+
+-- Резервные копии настроек клиентов (привязаны к токену)
+CREATE TABLE IF NOT EXISTS client_configs (
+	token_hash  TEXT PRIMARY KEY REFERENCES tokens(hash) ON DELETE CASCADE,
+	config_json TEXT NOT NULL,
+	updated_at  INTEGER NOT NULL
+);
 `
 
 // migrations — доводка схемы на уже существующих БД. ALTER TABLE в SQLite не
@@ -411,4 +418,34 @@ func (s *SQLite) CountByRole(ctx context.Context) (map[auth.Role]int, error) {
 		out[auth.Role(role)] = n
 	}
 	return out, rows.Err()
+}
+
+// PutClientConfig сохраняет бэкап настроек клиента по его хешу токена.
+func (s *SQLite) PutClientConfig(ctx context.Context, tokenHash, configJSON string) error {
+	now := time.Now().UnixNano()
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO client_configs (token_hash, config_json, updated_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(token_hash) DO UPDATE SET config_json=excluded.config_json, updated_at=excluded.updated_at
+	`, tokenHash, configJSON, now)
+	if err != nil {
+		return fmt.Errorf("db: сохранение бэкапа клиента: %w", err)
+	}
+	return nil
+}
+
+// GetClientConfig возвращает сохранённый бэкап настроек клиента по его хешу токена.
+func (s *SQLite) GetClientConfig(ctx context.Context, tokenHash string) (string, time.Time, error) {
+	var configJSON string
+	var updatedAt int64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT config_json, updated_at FROM client_configs WHERE token_hash = ?
+	`, tokenHash).Scan(&configJSON, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", time.Time{}, ErrNotFound
+	}
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("db: чтение бэкапа клиента: %w", err)
+	}
+	return configJSON, time.Unix(0, updatedAt), nil
 }

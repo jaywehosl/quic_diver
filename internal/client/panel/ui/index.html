@@ -143,10 +143,22 @@
       <select id="nat46"><option value="auto">авто</option><option value="on">вкл</option><option value="off">выкл</option></select>
     </label>
   </div>
-  <p class="hint">
-    Оба семейства выключены — перехватываются оба. «Забирать DNS» нужно, чтобы запросы
-    шли через узел: иначе провайдер видит и подменяет их.
-  </p>
+
+  <h2>Локальные параметры приложения</h2>
+  <div class="row wrap">
+    <label>Скорость BRUTAL (Мбит/с)
+      <input id="brutalMbps" type="number" class="narrow" placeholder="700" value="700">
+    </label>
+    <label class="check"><input type="checkbox" id="autoConnect"> Автоподключение при старте</label>
+    <label class="check"><input type="checkbox" id="autoStart"> Автозапуск с ОС</label>
+    <label class="check"><input type="checkbox" id="logEnabled"> Лог в файл</label>
+    <label>Макс лог (МБ)
+      <input id="logMaxMB" type="number" class="narrow" placeholder="1" value="1">
+    </label>
+    <label>Уровень лога
+      <select id="logLevel"><option value="info">Рабочий (Info)</option><option value="debug">Отладка (Debug)</option><option value="trace">Полный (Trace)</option></select>
+    </label>
+  </div>
 
   <div class="row">
     <button id="btnSaveNode" class="primary">Сохранить</button>

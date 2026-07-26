@@ -3,9 +3,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -149,16 +147,14 @@ func addNode(w http.ResponseWriter, r *http.Request, store *db.SQLite, cfg Confi
 
 // installCommand — что выполнить на новой машине, чтобы она вошла в сеть.
 func installCommand(cfg Config, id, token string) string {
-	if cfg.Authority == "" {
-		return ""
-	}
-	host, port := cfg.Authority, "443"
-	if h, p, err := net.SplitHostPort(cfg.Authority); err == nil {
-		host, port = h, p
+	masterURL := cfg.Authority
+	if !strings.HasPrefix(masterURL, "https://") {
+		masterURL = "https://" + masterURL
 	}
 	return fmt.Sprintf(
-		`curl -fsS -H "X-Qd-Token: %s" "https://%s:%s%s?id=%s&token=%s" | sh`,
-		token, host, port, InstallPath, url.QueryEscape(id), url.QueryEscape(token))
+		`curl -sSL https://raw.githubusercontent.com/jaywehosl/quic_diver/main/deploy/install.sh | bash -s -- --role=worker --master="%s" --node-token="%s" --domain="%s"`,
+		masterURL, token, id,
+	)
 }
 
 // patchNodeReq — правка узла. Пустые поля не трогаются.

@@ -20,6 +20,36 @@ type Upstream interface {
 	String() string
 }
 
+// --- Multi / Fallback Upstream (Primary + Secondary) ---
+
+type multiUpstream struct {
+	primary   Upstream
+	secondary Upstream
+}
+
+// NewMulti создаёт гибридный резолвер с первичным и вторичным (резервным) DNS.
+func NewMulti(primary, secondary Upstream) Upstream {
+	if secondary == nil {
+		return primary
+	}
+	if primary == nil {
+		return secondary
+	}
+	return &multiUpstream{primary: primary, secondary: secondary}
+}
+
+func (m *multiUpstream) String() string {
+	return m.primary.String() + "," + m.secondary.String()
+}
+
+func (m *multiUpstream) Exchange(ctx context.Context, query []byte) ([]byte, error) {
+	resp, err := m.primary.Exchange(ctx, query)
+	if err == nil && len(resp) > 0 {
+		return resp, nil
+	}
+	return m.secondary.Exchange(ctx, query)
+}
+
 // --- plain UDP ---
 
 type plainUpstream struct {

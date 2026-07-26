@@ -93,6 +93,28 @@ func adminCluster(cfg Config) http.Handler {
 				Cluster: state, Self: cfg.NodeID, IsMaster: state.IsMaster(cfg.NodeID),
 			})
 
+		case http.MethodPut:
+			// Мгновенная рассылка свежей БД на всю сеть
+			state, err := store.ClusterState(r.Context())
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			newState, err := store.Promote(r.Context(), state.MasterID)
+			if err != nil && !errors.Is(err, db.ErrStaleEpoch) {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if newState.Epoch > 0 {
+				state = newState
+			}
+			log.Printf("админ вызвал мгновенную рассылку базы на всю сеть (поколение %d)", state.Epoch)
+			writeJSON(w, map[string]any{
+				"status":  "ok",
+				"message": "Свежая база данных мгновенно объявлена всей сети",
+				"epoch":   state.Epoch,
+			})
+
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}

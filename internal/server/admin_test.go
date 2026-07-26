@@ -146,3 +146,20 @@ func TestRevokedAdminTokenRejected(t *testing.T) {
 		t.Fatal("отозванный админ-токен принят")
 	}
 }
+
+func TestClusterBroadcast(t *testing.T) {
+	cfg, _ := usersCfg(t)
+	cfg.NodeID = "master.node"
+
+	h := adminCluster(cfg)
+	r := req(http.MethodPut, "/qd-admin/cluster", "", auth.RoleAdmin)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT status %d, want 200", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "Свежая база данных") {
+		t.Fatalf("ожидалось сообщение о рассылке, получено %s", w.Body.String())
+	}
+}

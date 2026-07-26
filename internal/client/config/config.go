@@ -30,18 +30,19 @@ type Config struct {
 	Routing   Routing   `json:"routing"`
 	Transport Transport `json:"transport"`
 	Panel     Panel     `json:"panel"`
+	Logging   Logging   `json:"logging"`
 
 	// Autoconnect — заворачивать трафик сразу при старте сервиса.
-	//
-	// По умолчанию ВЫКЛЮЧЕНО. Запуск клиента и заворачивание трафика — разные
-	// вещи: при старте поднимается панель и авторизуется управляющая связь с
-	// узлом, а система остаётся нетронутой — системный прокси и DNS на месте.
-	// Перехват включает человек кнопкой, осознанно.
-	//
-	// Прежнее поведение (сразу перехват) означало, что двойной клик по значку
-	// молча менял сетевые настройки машины ещё до того, как человек увидел
-	// панель.
 	Autoconnect bool `json:"autoconnect"`
+	// AutoStart — автозапуск приложения вместе с ОС Windows.
+	AutoStart bool `json:"autostart"`
+}
+
+// Logging — настройки логирования в файл.
+type Logging struct {
+	Enabled bool   `json:"enabled"`
+	MaxMB   int    `json:"max_mb"`
+	Level   string `json:"level"` // "info", "debug", "trace"
 }
 
 // Node — к чему подключаться.
@@ -145,11 +146,11 @@ func Default() Config {
 			NAT46:       "auto",
 		},
 		Routing:   Routing{Default: "direct"},
-		Transport: Transport{Hybrid: true, RecvWorkers: 1, MTU: 1420},
-		// Порт редкий и постоянный: панель открывается закладкой, а не поиском
-		// свободного порта при каждом запуске.
-		Panel:       Panel{Addr: "127.0.0.1:47821", Open: true},
+		Transport: Transport{Hybrid: true, RecvWorkers: 1, MTU: 1420, BrutalMbps: 700},
+		Panel:     Panel{Addr: "127.0.0.1:47821", Open: true},
+		Logging:   Logging{Enabled: false, MaxMB: 1, Level: "info"},
 		Autoconnect: false,
+		AutoStart:   false,
 	}
 }
 
@@ -257,7 +258,10 @@ func (c Config) SaveTo(path string) error {
 		return fmt.Errorf("config: закрытие: %w", err)
 	}
 	if err := os.Rename(tmpName, path); err != nil {
-		return fmt.Errorf("config: замена %s: %w", path, err)
+		return fmt.Errorf("config: атомарная замена: %w", err)
 	}
+
+	_ = SetAutoStart(c.AutoStart)
+	_ = SetupLogging(c.Logging)
 	return nil
 }

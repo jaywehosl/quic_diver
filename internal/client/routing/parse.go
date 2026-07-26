@@ -44,12 +44,16 @@ func ParseRules(s string) ([]Rule, error) {
 		// «dom:youtube.com = auto:de» читается лучше слитного. Требовать
 		// отсутствия пробелов значило бы ловить человека на пустом месте.
 		kind, val = strings.TrimSpace(kind), strings.TrimSpace(val)
-		r := Rule{Out: strings.TrimSpace(out)}
+		r := Rule{Out: NormalizeOutbound(out)}
 		switch kind {
 		case "dom":
 			r.Match.Domain = val
 		case "proc":
 			r.Match.Process = val
+		case "geosite":
+			r.Match.GeoSite = val
+		case "geoip":
+			r.Match.GeoIP = val
 		case "cidr":
 			p, err := netip.ParsePrefix(val)
 			if err != nil {

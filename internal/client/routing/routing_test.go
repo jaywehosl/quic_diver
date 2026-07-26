@@ -173,3 +173,102 @@ func TestParseRules(t *testing.T) {
 		t.Fatal("битый порт принят")
 	}
 }
+
+func TestGeoSiteAndGeoIPAndProxyChains(t *testing.T) {
+	rules, err := ParseRules(`
+		geosite:youtube = node2;
+		geosite:google = node1,node2;
+		geoip:private = direct;
+		dom:2ip.ru = path:node1;
+	`)
+	if err != nil {
+		t.Fatalf("ParseRules: %v", err)
+	}
+	if len(rules) != 4 {
+		t.Fatalf("ожидалось 4 правила, получено %d", len(rules))
+	}
+	if rules[1].Out != "path:node1,node2" {
+		t.Fatalf("цепочка прокси не нормализована: %q", rules[1].Out)
+	}
+
+	rs := Compile(rules, "direct")
+
+	// 1. YouTube -> node2 (более специфичное правило идет первым)
+	if out := rs.Classify(Flow{Domain: "googlevideo.com"}); out != "node2" {
+		t.Fatalf("geosite:youtube: got %q, want node2", out)
+	}
+
+	// 2. Google -> path:node1,node2
+	if out := rs.Classify(Flow{Domain: "mail.google.com"}); out != "path:node1,node2" {
+		t.Fatalf("geosite:google: got %q, want path:node1,node2", out)
+	}
+
+	// 3. Local IP -> direct
+	if out := rs.Classify(Flow{Dst: dst("192.168.1.1:80")}); out != "direct" {
+		t.Fatalf("geoip:private: got %q, want direct", out)
+	}
+
+	// 4. Domain rule -> path:node1
+	if out := rs.Classify(Flow{Domain: "2ip.ru"}); out != "path:node1" {
+		t.Fatalf("dom:2ip.ru: got %q, want path:node1", out)
+	}
+}
+
+func TestRouterCRUD(t *testing.T) {
+	r := NewRouter(Compile([]Rule{
+		{Match: Match{Domain: "youtube.com"}, Out: "node1"},
+		{Match: Match{Domain: "google.com"}, Out: "node2"},
+	}, "direct"))
+
+	if len(r.CurrentRuleset().Rules()) != 2 {
+		t.Fatalf("len = %d, want 2", len(r.CurrentRuleset().Rules()))
+	}
+
+	// 1. AddRule
+	r.AddRule(Rule{Match: Match{Process: "telegram.exe"}, Out: "node3"})
+	if len(r.CurrentRuleset().Rules()) != 3 {
+		t.Fatalf("AddRule: len = %d, want 3", len(r.CurrentRuleset().Rules()))
+	}
+
+	// 2. UpdateRule
+	ok := r.UpdateRule(0, Rule{Match: Match{Domain: "youtube.com"}, Out: "path:node1,node2"})
+	if !ok || r.CurrentRuleset().Rules()[0].Out != "path:node1,node2" {
+		t.Fatalf("UpdateRule failed")
+	}
+
+	// 3. MoveRule (переставить index 1 на index 0 для правил одной категории)
+	r.AddRule(Rule{Match: Match{Domain: "vk.com"}, Out: "node4"})
+	ok = r.MoveRule(2, 0)
+	if !ok || r.CurrentRuleset().Rules()[0].Match.Domain != "vk.com" {
+		t.Fatalf("MoveRule failed: got %+v", r.CurrentRuleset().Rules()[0])
+	}
+
+	// 4. DeleteRule (удалить index 0)
+	ok = r.DeleteRule(0)
+	if !ok || len(r.CurrentRuleset().Rules()) != 3 {
+		t.Fatalf("DeleteRule failed")
+	}
+}
+
+func TestRulePriorityHierarchy(t *testing.T) {
+	// Добавляем правило процесса ПЕРВЫМ в список, но доменные правила должны перевесить!
+	rs := Compile([]Rule{
+		{Match: Match{Process: "chrome.exe"}, Out: "process-route"},
+		{Match: Match{Domain: "youtube.com"}, Out: "domain-route"},
+	}, "default-route")
+
+	// Chrome к youtube.com -> должен сработать domain-route (Домен важнее Процесса)
+	if out := rs.Classify(Flow{Process: "chrome.exe", Domain: "youtube.com"}); out != "domain-route" {
+		t.Fatalf("Chrome to Youtube: got %q, want domain-route", out)
+	}
+
+	// Chrome к другому сайту -> должен сработать process-route
+	if out := rs.Classify(Flow{Process: "chrome.exe", Domain: "example.com"}); out != "process-route" {
+		t.Fatalf("Chrome to Example: got %q, want process-route", out)
+	}
+
+	// Любое другое приложение -> должен сработать default-route
+	if out := rs.Classify(Flow{Process: "vlc.exe", Domain: "example.com"}); out != "default-route" {
+		t.Fatalf("VLC to Example: got %q, want default-route", out)
+	}
+}

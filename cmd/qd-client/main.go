@@ -111,8 +111,11 @@ func main() {
 	}
 
 	log.SetPrefix("qd-client: ")
-	// Журнал в файл: релизная сборка идёт без консоли, и без файла причина
-	// поломки просто исчезала бы.
+	// Инициализация файлового логера (если включён) и автозапуска с ОС
+	if cfgErr == nil {
+		_ = config.SetupLogging(cfg.Logging)
+		_ = config.SetAutoStart(cfg.AutoStart)
+	}
 	defer setupLog(!hasConsole())()
 
 	// congestion выбирается внутри quic-go (наш патч читает переменную) — флаг

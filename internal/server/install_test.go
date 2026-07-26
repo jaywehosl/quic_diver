@@ -207,10 +207,10 @@ func TestAddNodeReturnsInstallCommand(t *testing.T) {
 		strings.NewReader(`{"id":"fresh.example"}`)), store, cfg)
 
 	body := w.Body.String()
-	if !strings.Contains(body, InstallPath) || !strings.Contains(body, "master.example") {
+	if !strings.Contains(body, "install.sh") || !strings.Contains(body, "master.example") {
 		t.Fatalf("нет команды установки: %s", body)
 	}
-	if !strings.Contains(body, "| sh") {
+	if !strings.Contains(body, "| bash") {
 		t.Fatalf("команда не исполняема: %s", body)
 	}
 }

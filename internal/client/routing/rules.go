@@ -32,6 +32,8 @@ const RouteHeaderName = "Qd-Route"
 type Match struct {
 	Process string       // имя процесса, напр. "telegram.exe" (регистронезависимо)
 	Domain  string       // доменный суффикс, напр. "youtube.com" (матчит и *.youtube.com)
+	GeoSite string       // категория geosite, напр. "google", "youtube", "ru", "category-ads-all"
+	GeoIP   string       // код geoip, напр. "ru", "private"
 	CIDR    netip.Prefix // подсеть назначения
 	Port    uint16       // порт назначения
 }
@@ -56,13 +58,29 @@ type Ruleset struct {
 	def   string // выход по умолчанию (нет совпадений)
 }
 
-// Compile строит набор из правил. def — выход по умолчанию (обычно "direct").
-//
-// Матч линейный (порядок правил = приоритет). Доменные наборы на тысячи записей
-// поедут через суффиксное дерево, когда до них дойдёт (сейчас правил единицы —
-// линейного хватает, и он сохраняет порядок без ухищрений).
+// SortRulesByPriority сортирует правила по строгому иерархическому приоритету:
+// 1. Доменные правила, GeoSite, GeoIP, CIDR и Порты (самый высокий приоритет — точечные переопределения).
+// 2. Правила по процессам (proc:) (средний приоритет — приложение целиком).
+// Порядок внутри каждой категории сохраняется.
+func SortRulesByPriority(rules []Rule) []Rule {
+	var specific []Rule
+	var proc []Rule
+
+	for _, r := range rules {
+		if r.Match.Process != "" && r.Match.Domain == "" && r.Match.GeoSite == "" && r.Match.GeoIP == "" && !r.Match.CIDR.IsValid() && r.Match.Port == 0 {
+			proc = append(proc, r)
+		} else {
+			specific = append(specific, r)
+		}
+	}
+
+	return append(specific, proc...)
+}
+
+// Compile строит набор из правил с авто-сортировкой по приоритету (Домены/Geo -> Процессы -> Default).
 func Compile(rules []Rule, def string) *Ruleset {
-	return &Ruleset{rules: append([]Rule(nil), rules...), def: def}
+	sorted := SortRulesByPriority(rules)
+	return &Ruleset{rules: sorted, def: def}
 }
 
 // Classify возвращает метку выхода для флоу. Первое совпавшее правило выигрывает;
@@ -102,6 +120,14 @@ func matchRule(r *Rule, f Flow) (string, bool) {
 		}
 	case m.Domain != "":
 		if f.Domain != "" && domainMatches(m.Domain, f.Domain) {
+			return r.Out, true
+		}
+	case m.GeoSite != "":
+		if f.Domain != "" && geoSiteMatches(m.GeoSite, f.Domain) {
+			return r.Out, true
+		}
+	case m.GeoIP != "":
+		if f.Dst.Addr().IsValid() && geoIPMatches(m.GeoIP, f.Dst.Addr()) {
 			return r.Out, true
 		}
 	case m.CIDR.IsValid():
@@ -149,3 +175,52 @@ func (r *Router) Swap(rs *Ruleset) { r.rs.Store(rs) }
 
 // Classify классифицирует флоу текущим набором.
 func (r *Router) Classify(f Flow) string { return r.rs.Load().Classify(f) }
+
+// CurrentRuleset возвращает текущий скомпилированный набор правил.
+func (r *Router) CurrentRuleset() *Ruleset { return r.rs.Load() }
+
+// AddRule добавляет новое правило в конец набора и атомарно обновляет роутер.
+func (r *Router) AddRule(rule Rule) {
+	cur := r.rs.Load()
+	rules := cur.Rules()
+	rules = append(rules, rule)
+	r.Swap(Compile(rules, cur.Default()))
+}
+
+// UpdateRule обновляет правило по индексу.
+func (r *Router) UpdateRule(index int, rule Rule) bool {
+	cur := r.rs.Load()
+	rules := cur.Rules()
+	if index < 0 || index >= len(rules) {
+		return false
+	}
+	rules[index] = rule
+	r.Swap(Compile(rules, cur.Default()))
+	return true
+}
+
+// DeleteRule удаляет правило по индексу.
+func (r *Router) DeleteRule(index int) bool {
+	cur := r.rs.Load()
+	rules := cur.Rules()
+	if index < 0 || index >= len(rules) {
+		return false
+	}
+	rules = append(rules[:index], rules[index+1:]...)
+	r.Swap(Compile(rules, cur.Default()))
+	return true
+}
+
+// MoveRule меняет порядок правил (переставляет правило с from на to).
+func (r *Router) MoveRule(from, to int) bool {
+	cur := r.rs.Load()
+	rules := cur.Rules()
+	if from < 0 || from >= len(rules) || to < 0 || to >= len(rules) || from == to {
+		return false
+	}
+	item := rules[from]
+	rules = append(rules[:from], rules[from+1:]...)
+	rules = append(rules[:to], append([]Rule{item}, rules[to:]...)...)
+	r.Swap(Compile(rules, cur.Default()))
+	return true
+}

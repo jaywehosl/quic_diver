@@ -34,10 +34,19 @@ while [[ $# -gt 0 ]]; do
         --node-token=*) NODE_TOKEN="${1#*=}" ;;
         --primary-dns=*) PRIMARY_DNS="${1#*=}" ;;
         --secondary-dns=*) SECONDARY_DNS="${1#*=}" ;;
-        *) ;;
+        *)
+            if [[ -z "$DOMAIN" && "$1" != -* ]]; then
+                DOMAIN="$1"
+            fi
+            ;;
     esac
     shift
 done
+
+# Если скрипт вызван через конвейер (curl | bash), перенаправляем stdin на /dev/tty для интерактивного ввода
+if [ ! -t 0 ] && [ -c /dev/tty ]; then
+    exec < /dev/tty
+fi
 
 echo -e "${COLOR_CYAN}"
 echo "================================================================="
@@ -56,7 +65,7 @@ log_info "Публичный IP сервера: ${SERVER_IP:-'не опреде�
 
 # 2. Интерактивный опрос (только для Master роли)
 if [[ "$ROLE" == "master" && -z "$DOMAIN" ]]; then
-    read -p "Введите домен сервера (например, qd1.example.com): " DOMAIN </dev/tty
+    read -p "Введите домен сервера (например, qd1.example.com): " DOMAIN
     if [[ -z "$DOMAIN" ]]; then
         log_error "Домен не может быть пустым!"
         exit 1
@@ -85,15 +94,15 @@ log_ok "Проверка DNS успешна!"
 
 # 4. Опрос про DNS и Fake IPv6 (только для интерактивного режима Master)
 if [[ "$ROLE" == "master" ]]; then
-    read -p "Использовать кастомные DNS серверы? [y/N]: " USE_CUSTOM_DNS </dev/tty
+    read -p "Использовать кастомные DNS серверы? [y/N]: " USE_CUSTOM_DNS
     if [[ "$USE_CUSTOM_DNS" =~ ^[Yy]$ ]]; then
-        read -p "Введите Первичный DNS (Primary IP): " USER_PRIM </dev/tty
-        read -p "Введите Вторичный DNS (Secondary IP): " USER_SEC </dev/tty
+        read -p "Введите Первичный DNS (Primary IP): " USER_PRIM
+        read -p "Введите Вторичный DNS (Secondary IP): " USER_SEC
         [[ -n "$USER_PRIM" ]] && PRIMARY_DNS="$USER_PRIM"
         [[ -n "$USER_SEC" ]] && SECONDARY_DNS="$USER_SEC"
     fi
 
-    read -p "Включить Fake IPv6 (NAT46) для ресурсов вроде ntc.party? [Y/n]: " USE_NAT46 </dev/tty
+    read -p "Включить Fake IPv6 (NAT46) для ресурсов вроде ntc.party? [Y/n]: " USE_NAT46
     if [[ "$USE_NAT46" =~ ^[Nn]$ ]]; then
         ENABLE_NAT46="false"
     fi

@@ -3,229 +3,406 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>QUIC Diver</title>
+<title>QUIC Diver — Панель управления</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
 
-<!-- ПЕРВЫЙ ЗАПУСК: пока клиент не настроен, показывать интерфейс нечем и
-     незачем — все экраны опираются на узел, которого нет. Одно поле и одно
-     действие: вставить ссылку. -->
-<div id="setup" class="setup" hidden>
-  <div class="setup-box">
-    <h1>QUIC&nbsp;Diver</h1>
-    <p>Вставьте ссылку подключения — её выдаёт администратор сети.</p>
-    <input id="setupLink" placeholder="qd://…" autocomplete="off" spellcheck="false">
-    <button id="setupApply" class="primary">Подключить сеть</button>
-    <div id="setupMsg" class="msg"></div>
-    <p class="hint">
-      Ссылка содержит адрес узла и ваш токен. Остальное — список узлов, резервные
-      точки входа, лимиты — клиент получит от сети сам.
+<!-- СМОТР ПЕРВОГО ЗАПУСКА: Ввод ссылки подписки при чистом старте -->
+<div id="setup" class="setup-overlay" hidden>
+  <div class="setup-card">
+    <div class="setup-header">
+      <div class="brand-logo">QD</div>
+      <h1>QUIC Diver</h1>
+      <p>Вставьте ссылку подключения (выдаётся администратором)</p>
+    </div>
+    <div class="setup-form">
+      <input id="setupLink" placeholder="qd://ey..." autocomplete="off" spellcheck="false">
+      <button id="setupApply" class="btn btn-primary btn-block">Подключить сеть</button>
+      <div id="setupMsg" class="form-msg"></div>
+    </div>
+    <p class="setup-hint">
+      Ссылка содержит адрес узла, ваши права и ключ доступа. Все параметры сети подтянутся автоматически.
     </p>
   </div>
 </div>
 
-<header class="top">
-  <div class="brand">QUIC&nbsp;Diver</div>
+<div class="app-layout">
+  <!-- ВЕРХНЯЯ ПАНЕЛЬ СТАТУСА -->
+  <header class="app-header">
+    <div class="header-brand">
+      <span class="logo-icon">QD</span>
+      <span class="logo-text">QUIC <strong>Diver</strong></span>
+      <span class="version-tag" id="ver">v2.0</span>
+    </div>
 
-  <!-- Состояние видно на любом экране: панель открывают, чтобы понять, что
-       происходит, и прятать это за вкладкой незачем. -->
-  <div class="state" id="state">
-    <span class="dot" id="dot"></span>
-    <span id="stateText">загружаю…</span>
-    <span class="muted" id="stateNode"></span>
-  </div>
+    <!-- ТЕКУЩИЙ СТАТУС СЕДА -->
+    <div class="connection-status-pill" id="state">
+      <span class="status-dot" id="dot"></span>
+      <span class="status-label" id="stateText">Загрузка...</span>
+      <span class="status-node-info" id="stateNode"></span>
+    </div>
 
-  <span class="ver" id="ver" title="версия сборки"></span>
-  <div class="actions">
-    <button id="btnConnect" class="primary">Подключить</button>
-    <button id="btnDisconnect" hidden>Отключить</button>
-  </div>
-</header>
+    <!-- КНОПКИ УПРАВЛЕНИЯ СЕССИЕЙ -->
+    <div class="header-actions">
+      <button id="btnConnect" class="btn btn-connect">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        <span>Подключить</span>
+      </button>
+      <button id="btnDisconnect" class="btn btn-disconnect" hidden>
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+        <span>Отключить</span>
+      </button>
+    </div>
+  </header>
 
-<nav class="tabs" id="tabs">
-  <a href="#rules" data-tab="rules">Правила</a>
-  <a href="#node" data-tab="node">Подключение</a>
-  <a href="#exits" data-tab="exits">Выходы</a>
-  <a href="#sub" data-tab="sub">Подписка</a>
-  <a href="#notices" data-tab="notices">Уведомления<span class="badge" id="unread" hidden></span></a>
-  <a href="#admin" data-tab="admin">Сеть</a>
-  <a href="#help" data-tab="help">Справка</a>
-</nav>
+  <!-- ВКЛАДКИ НАВИГАЦИИ -->
+  <nav class="app-nav">
+    <a href="#dashboard" data-tab="dashboard" class="nav-item active">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3h7v7H3zM14 3h7v7h-7zM14 14h7v7h-7zM3 14h7v7H3z"/></svg>
+      <span>Обзор</span>
+    </a>
+    <a href="#rules" data-tab="rules" class="nav-item">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+      <span>Роутинг</span>
+    </a>
+    <a href="#node" data-tab="node" class="nav-item">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 3v18M3 12h18"/></svg>
+      <span>Точки входа & Бэкап</span>
+    </a>
+    <a href="#sub" data-tab="sub" class="nav-item">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+      <span>Подписка</span>
+    </a>
+    <a href="#exits" data-tab="exits" class="nav-item">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+      <span>Выходы</span>
+    </a>
+    <a href="#notices" data-tab="notices" class="nav-item">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+      <span>Уведомления <span class="badge" id="unread" hidden>0</span></span>
+    </a>
+    <a href="#admin" data-tab="admin" class="nav-item nav-admin">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+      <span>Управление сетью</span>
+    </a>
+    <a href="#settings" data-tab="settings" class="nav-item">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      <span>Настройки</span>
+    </a>
+  </nav>
 
-<main>
+  <!-- ОСНОВНОЙ КОНТЕНТ -->
+  <main class="app-content">
 
-<!-- ПРАВИЛА: главный экран. Ради него панель и открывают. -->
-<section id="tab-rules" class="tab">
-  <div class="cols">
-    <div class="col">
-      <h2>Правила маршрутизации</h2>
-      <p class="hint">
-        По одному правилу на строку, сверху вниз — <b>первое совпавшее выигрывает</b>.
-        Строка с <code>#</code> в начале не действует.
-      </p>
-      <textarea id="rules" spellcheck="false" rows="14"
-                placeholder="dom:youtube.com = auto:de&#10;cidr:10.0.0.0/8 = direct&#10;port:22 = direct"></textarea>
+    <!-- 1. ОБЗОР (DASHBOARD) -->
+    <section id="tab-dashboard" class="tab-page">
+      <div class="dash-grid">
+        <div class="card status-card">
+          <div class="card-header">
+            <h3>Состояние подключения</h3>
+            <span class="pulse-indicator" id="dashPulse"></span>
+          </div>
+          <div class="status-big-display">
+            <span class="status-title" id="dashStatusTitle">ОТКЛЮЧЕНО</span>
+            <span class="status-sub" id="dashStatusSub">Система работает в обычном режиме</span>
+          </div>
+          <div class="dash-meta-grid">
+            <div class="meta-item">
+              <span class="meta-label">Активный узел</span>
+              <span class="meta-value" id="dashNodeName">—</span>
+            </div>
+            <div class="meta-item">
+              <span class="meta-label">Шлюз подключения</span>
+              <span class="meta-value" id="dashNodeAddr">—</span>
+            </div>
+            <div class="meta-item">
+              <span class="meta-label">Режим сокета</span>
+              <span class="meta-value">QUIC Connect-IP</span>
+            </div>
+            <div class="meta-item">
+              <span class="meta-label">BRUTAL Ускорение</span>
+              <span class="meta-value" id="dashBrutalRate">700 Мбит/с</span>
+            </div>
+          </div>
+        </div>
 
-      <div class="row">
-        <label>По умолчанию
-          <input id="defaultOut" list="outs" placeholder="direct">
-        </label>
-        <button id="btnSaveRules" class="primary">Сохранить</button>
-        <span id="rulesMsg" class="msg"></span>
+        <div class="card stat-card">
+          <h3>Статистика & Ресурсы</h3>
+          <div class="stat-boxes">
+            <div class="stat-box">
+              <span class="stat-num" id="dashStatTraffic">0 МБ</span>
+              <span class="stat-desc">Потреблено трафика</span>
+            </div>
+            <div class="stat-box">
+              <span class="stat-num" id="dashStatLimit">Безлимит</span>
+              <span class="stat-desc">Лимит аккаунта</span>
+            </div>
+            <div class="stat-box">
+              <span class="stat-num" id="dashStatAttempts">0</span>
+              <span class="stat-desc">Переподключений</span>
+            </div>
+          </div>
+          <div class="quick-banner">
+            <div class="banner-title">⚡ BRUTAL Congestion Active</div>
+            <div class="banner-text">Протокол игнорирует потери пакетов провайдером для максимальной скорости.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 2. РОУТИНГ (RULES) -->
+    <section id="tab-rules" class="tab-page" hidden>
+      <div class="section-title">
+        <h2>Маршрутизация трафика</h2>
+        <p class="subtitle">Настройка правил перенаправления запросов. Строки с <code>#</code> игнорируются.</p>
       </div>
 
-      <details class="ref">
-        <summary>Как писать правила</summary>
-        <table>
-          <tr><td><code>dom:youtube.com</code></td><td>домен и его поддомены</td></tr>
-          <tr><td><code>cidr:10.0.0.0/8</code></td><td>подсеть назначения</td></tr>
-          <tr><td><code>port:443</code></td><td>порт назначения</td></tr>
-          <tr><td><code>proc:chrome.exe</code></td><td>процесс <b class="warn">(пока не работает)</b></td></tr>
-        </table>
-        <p class="hint">
-          Справа от <code>=</code> — куда направить: <code>direct</code> (наружу здесь),
-          идентификатор узла или <code>auto:тег</code> (лучший узел с этим тегом).
-        </p>
-      </details>
-    </div>
-
-    <!-- ТЕСТЕР: лекарство от главной боли. Правила матчатся по порядку, и
-         «почему пошло не туда» иначе выясняется на живом трафике. -->
-    <div class="col side">
-      <h2>Проверка</h2>
-      <p class="hint">Куда пойдёт трафик к адресу — по текущим сохранённым правилам.</p>
-      <div class="row">
-        <input id="testHost" placeholder="rr1.youtube.com или 10.1.2.3" autocomplete="off">
-        <input id="testPort" placeholder="443" class="narrow" inputmode="numeric">
-        <button id="btnTest">Проверить</button>
+      <!-- Карточка с правилом приоритетов -->
+      <div class="priority-banner card">
+        <div class="priority-title">⚡ Иерархия применения правил (сверху вниз):</div>
+        <div class="priority-steps">
+          <div class="p-step">
+            <span class="step-num">1</span>
+            <span class="step-txt"><strong>Доменные правила & Geosite</strong> (самый высокий приоритет: <code>dom:youtube.com = auto:de</code>)</span>
+          </div>
+          <div class="p-step">
+            <span class="step-num">2</span>
+            <span class="step-txt"><strong>Правила по процессам</strong> (например: <code>proc:chrome.exe = direct</code>)</span>
+          </div>
+          <div class="p-step">
+            <span class="step-num">3</span>
+            <span class="step-txt"><strong>Базовый маршрут по умолчанию</strong> (всё остальное: <code>direct</code> или узел)</span>
+          </div>
+        </div>
       </div>
-      <div id="testResult" class="result" hidden></div>
-    </div>
-  </div>
-</section>
 
-<!-- ПОДКЛЮЧЕНИЕ: узел, токен, что перехватывать. -->
-<section id="tab-node" class="tab" hidden>
-  <h2>Ссылка подключения</h2>
-  <p class="hint">
-    Получили ссылку вида <code>qd://…</code> — вставьте её сюда. Клиент настроится сам:
-    узел, резервные точки и токен приедут вместе с ней.
-  </p>
-  <div class="row">
-    <input id="bundle" placeholder="qd://…" autocomplete="off" spellcheck="false">
-    <button id="btnBundle" class="primary">Применить</button>
-    <span id="bundleMsg" class="msg"></span>
-  </div>
+      <!-- Быстрый пресет доменов -->
+      <div class="card preset-card">
+        <span class="preset-label">Быстрые пресеты:</span>
+        <div class="preset-buttons">
+          <button type="button" class="btn btn-sm" onclick="addRulePreset('youtube')">+ YouTube</button>
+          <button type="button" class="btn btn-sm" onclick="addRulePreset('discord')">+ Discord</button>
+          <button type="button" class="btn btn-sm" onclick="addRulePreset('telegram')">+ Telegram</button>
+          <button type="button" class="btn btn-sm" onclick="addRulePreset('steam')">+ Steam</button>
+          <button type="button" class="btn btn-sm" onclick="addRulePreset('chatgpt')">+ ChatGPT</button>
+        </div>
+      </div>
 
-  <h2>Узел и доступ</h2>
-  <p class="hint">
-    Адрес — <code>хост:порт</code> или <code>IP:порт</code>. Если указан IP, впишите домен
-    в SNI: тогда DNS в подключении не участвует, а сертификат остаётся валидным.
-  </p>
-  <table class="grid" id="entries"></table>
-  <div class="row">
-    <button id="btnAddEntry">Добавить точку входа</button>
-    <span class="hint">Резервные пробуются по порядку, если первая недоступна.</span>
-  </div>
+      <div class="cols-grid">
+        <div class="card col-main">
+          <h3>Редактор правил</h3>
+          <textarea id="rules" class="code-editor" rows="12" spellcheck="false"
+                    placeholder="# Доменные правила&#10;dom:youtube.com = auto:de&#10;dom:discord.gg = auto:de&#10;&#10;# Процессы&#10;proc:chrome.exe = auto:de&#10;proc:telegram.exe = direct&#10;&#10;# Сети и порты&#10;cidr:10.0.0.0/8 = direct&#10;port:22 = direct"></textarea>
 
-  <label class="wide">Токен доступа
-    <input id="token" type="password" autocomplete="off" placeholder="qd_…">
-  </label>
+          <div class="form-row mt-12">
+            <label class="form-label inline">Маршрут по умолчанию:
+              <input id="defaultOut" placeholder="direct" class="input-inline">
+            </label>
+            <button id="btnSaveRules" class="btn btn-primary">Сохранить правила</button>
+            <span id="rulesMsg" class="form-msg"></span>
+          </div>
+        </div>
 
-  <h2>Перехват</h2>
-  <div class="row wrap">
-    <label class="check"><input type="checkbox" id="capIPv4"> IPv4</label>
-    <label class="check"><input type="checkbox" id="capIPv6"> IPv6</label>
-    <label class="check"><input type="checkbox" id="manageDNS"> Забирать DNS</label>
-    <label class="check"><input type="checkbox" id="manageProxy"> Снимать системный прокси</label>
-    <label>NAT46
-      <select id="nat46"><option value="auto">авто</option><option value="on">вкл</option><option value="off">выкл</option></select>
-    </label>
-  </div>
+        <div class="card col-side">
+          <h3>Тестер маршрутов</h3>
+          <p class="hint-sm">Проверьте, по какому правилу пойдут запросы к конкретному домену или IP.</p>
+          <div class="form-stack mt-8">
+            <input id="testHost" placeholder="rr1.youtube.com или 1.1.1.1">
+            <input id="testPort" placeholder="443 (порт)">
+            <button id="btnTest" class="btn btn-secondary">Проверить адрес</button>
+          </div>
+          <div id="testResult" class="test-result-box" hidden></div>
+        </div>
+      </div>
+    </section>
 
-  <h2>Локальные параметры приложения</h2>
-  <div class="row wrap">
-    <label>Скорость BRUTAL (Мбит/с)
-      <input id="brutalMbps" type="number" class="narrow" placeholder="700" value="700">
-    </label>
-    <label class="check"><input type="checkbox" id="autoConnect"> Автоподключение при старте</label>
-    <label class="check"><input type="checkbox" id="autoStart"> Автозапуск с ОС</label>
-    <label class="check"><input type="checkbox" id="logEnabled"> Лог в файл</label>
-    <label>Макс лог (МБ)
-      <input id="logMaxMB" type="number" class="narrow" placeholder="1" value="1">
-    </label>
-    <label>Уровень лога
-      <select id="logLevel"><option value="info">Рабочий (Info)</option><option value="debug">Отладка (Debug)</option><option value="trace">Полный (Trace)</option></select>
-    </label>
-  </div>
+    <!-- 3. ТОЧКИ ВХОДА & БЭКАП (NODE & DB BACKUP) -->
+    <section id="tab-node" class="tab-page" hidden>
+      <div class="section-title">
+        <h2>Точки входа & Синхронизация БД</h2>
+        <p class="subtitle">Управление адресами подключения и сохранение настроек на сервере.</p>
+      </div>
 
-  <div class="row">
-    <button id="btnSaveNode" class="primary">Сохранить</button>
-    <span id="nodeMsg" class="msg"></span>
-  </div>
-</section>
+      <!-- Блок бэкапа на сервер -->
+      <div class="card backup-card">
+        <div class="backup-info">
+          <h3>💾 Бэкап настроек в БД сервера</h3>
+          <p class="hint-sm">Вы можете сохранить все ваши правила и настройки прямо в базу данных сервера. При чистой переустановке ОС их можно получить в 1 клик.</p>
+        </div>
+        <div class="backup-actions">
+          <button id="btnSaveServerBackup" class="btn btn-primary">Сохранить бэкап на сервер</button>
+          <button id="btnRestoreServerBackup" class="btn btn-secondary">Загрузить бэкап с сервера</button>
+        </div>
+        <div id="backupMsg" class="form-msg mt-4"></div>
+      </div>
 
-<!-- ПОДПИСКА: что о нас знает сеть. -->
-<section id="tab-sub" class="tab" hidden>
-  <h2>Подписка</h2>
-  <p class="hint">Что сеть сообщает о вас и о себе. Обновляется сама, обычно раз в час.</p>
-  <div class="row"><button id="btnRefreshSub">Обновить сейчас</button><span id="subMsg" class="msg"></span></div>
-  <div id="subBody"></div>
-</section>
+      <!-- Импорт подписки -->
+      <div class="card mt-16">
+        <h3>Импорт ссылки подписки (qd://)</h3>
+        <div class="form-row mt-8">
+          <input id="bundle" placeholder="qd://eyJ2..." autocomplete="off" spellcheck="false">
+          <button id="btnBundle" class="btn btn-primary">Применить подписку</button>
+        </div>
+        <span id="bundleMsg" class="form-msg"></span>
+      </div>
 
-<!-- ВЫХОДЫ: что публикует узел. -->
-<section id="tab-exits" class="tab" hidden>
-  <h2>Доступные выходы</h2>
-  <p class="hint">Метки для правил. Приезжают с узла — правило можно писать не вслепую.</p>
-  <div class="row"><button id="btnReloadExits">Обновить</button><span id="exitsMsg" class="msg"></span></div>
-  <table class="grid" id="exits"></table>
-</section>
+      <!-- Список точек входа -->
+      <div class="card mt-16">
+        <h3>Список узлов сети</h3>
+        <table class="grid-table" id="entries"></table>
+        <div class="mt-8">
+          <button id="btnAddEntry" class="btn btn-secondary">+ Добавить точку входа</button>
+        </div>
+      </div>
 
-<!-- УВЕДОМЛЕНИЯ -->
-<section id="tab-notices" class="tab" hidden>
-  <h2>Уведомления</h2>
-  <p class="hint">
-    Сюда попадает то, где система отступила от правил, чтобы оставить вас со связью:
-    выход был недоступен, трафик ушёл не туда, куда просили.
-  </p>
-  <div class="row">
-    <button id="btnReadAll">Отметить прочитанными</button>
-    <button id="btnClearNotices">Очистить</button>
-  </div>
-  <div id="notices" class="list"></div>
-</section>
+      <!-- Ключ доступа -->
+      <div class="card mt-16">
+        <h3>Ключ доступа (Токен)</h3>
+        <input id="token" type="password" autocomplete="off" placeholder="qd_...">
+      </div>
 
-<!-- СЕТЬ: управление узлами по админ-токену. -->
-<section id="tab-admin" class="tab" hidden>
-  <h2>Управление сетью</h2>
-  <p class="hint">
-    Админ-токен нужен только на время сеанса и <b>не сохраняется</b> — ключ от всей
-    сети не должен лежать на диске рядом с клиентским.
-  </p>
-  <div class="row">
-    <input id="adminToken" type="password" placeholder="админ-токен" autocomplete="off">
-    <button id="btnAdminLoad" class="primary">Войти</button>
-    <span id="adminMsg" class="msg"></span>
-  </div>
+      <!-- Перехват трафика -->
+      <div class="card mt-16">
+        <h3>Параметры перехвата</h3>
+        <div class="checks-grid">
+          <label class="checkbox-item"><input type="checkbox" id="capIPv4"> Перехватывать IPv4</label>
+          <label class="checkbox-item"><input type="checkbox" id="capIPv6"> Перехватывать IPv6</label>
+          <label class="checkbox-item"><input type="checkbox" id="manageDNS"> Управлять Системным DNS</label>
+          <label class="checkbox-item"><input type="checkbox" id="manageProxy"> Отключать системный прокси</label>
+        </div>
+      </div>
 
-  <div id="adminBody" hidden>
-    <div class="row wrap subtabs">
-      <button data-admin="nodes" class="primary">Узлы</button>
-      <button data-admin="users">Клиенты</button>
-      <button data-admin="stats">Состояние</button>
-      <button data-admin="cluster">Кластер</button>
-    </div>
-    <div id="adminView"></div>
-  </div>
-</section>
+      <div class="mt-16">
+        <button id="btnSaveNode" class="btn btn-primary">Сохранить параметры подключения</button>
+        <span id="nodeMsg" class="form-msg"></span>
+      </div>
+    </section>
 
-<!-- СПРАВКА -->
-<section id="tab-help" class="tab" hidden>
-  <div id="help"></div>
-</section>
+    <!-- 4. ПОДПИСКА -->
+    <section id="tab-sub" class="tab-page" hidden>
+      <div class="section-title">
+        <h2>Подписка сети</h2>
+        <p class="subtitle">Информация о вашем токене, лимитах трафика и доступных узлах.</p>
+      </div>
+      <div class="card">
+        <div class="form-row mb-12">
+          <button id="btnRefreshSub" class="btn btn-secondary">Обновить данные подписки</button>
+          <span id="subMsg" class="form-msg"></span>
+        </div>
+        <div id="subBody" class="sub-content-box"></div>
+      </div>
+    </section>
 
-</main>
+    <!-- 5. ВЫХОДЫ -->
+    <section id="tab-exits" class="tab-page" hidden>
+      <div class="section-title">
+        <h2>Доступные выходы (Nodes & Categories)</h2>
+        <p class="subtitle">Список категорий и узлов, которые можно указывать в правилах (например: <code>auto:de</code>).</p>
+      </div>
+      <div class="card">
+        <button id="btnReloadExits" class="btn btn-secondary mb-12">Обновить список выходов</button>
+        <span id="exitsMsg" class="form-msg"></span>
+        <table class="grid-table" id="exits"></table>
+      </div>
+    </section>
+
+    <!-- 6. УВЕДОМЛЕНИЯ -->
+    <section id="tab-notices" class="tab-page" hidden>
+      <div class="section-title">
+        <h2>Системные уведомления</h2>
+        <p class="subtitle">События сети, предупреждения и логи переключений.</p>
+      </div>
+      <div class="card">
+        <div class="form-row mb-12">
+          <button id="btnReadAll" class="btn btn-sm btn-secondary">Прочитать все</button>
+          <button id="btnClearNotices" class="btn btn-sm btn-danger">Очистить</button>
+        </div>
+        <div id="notices" class="notices-list"></div>
+      </div>
+    </section>
+
+    <!-- 7. СЕТЬ (ADMIN CONTROL PANEL) -->
+    <section id="tab-admin" class="tab-page" hidden>
+      <div class="section-title">
+        <h2>Управление сетью (Admin Dashboard)</h2>
+        <p class="subtitle">Администрирование серверов, пользователей, лимитов трафика и HWID привязок.</p>
+      </div>
+
+      <div class="card admin-auth-card">
+        <h3>Вход в режим администратора</h3>
+        <div class="form-row mt-8">
+          <input id="adminToken" type="password" placeholder="Админ-токен сети" autocomplete="off">
+          <button id="btnAdminLoad" class="btn btn-primary">Авторизоваться</button>
+        </div>
+        <span id="adminMsg" class="form-msg"></span>
+      </div>
+
+      <div id="adminBody" class="mt-16" hidden>
+        <!-- СУБВКЛАДКИ АДМИНКИ -->
+        <div class="admin-subtabs">
+          <button data-admin="nodes" class="subtab-btn active">Узлы сети</button>
+          <button data-admin="users" class="subtab-btn">Клиенты & HWID</button>
+          <button data-admin="cluster" class="subtab-btn">Кластер & База</button>
+          <button data-admin="stats" class="subtab-btn">Состояние</button>
+        </div>
+
+        <div id="adminView" class="card mt-12"></div>
+      </div>
+    </section>
+
+    <!-- 8. НАСТРОЙКИ КЛИЕНТА (SETTINGS) -->
+    <section id="tab-settings" class="tab-page" hidden>
+      <div class="section-title">
+        <h2>Настройки приложения</h2>
+        <p class="subtitle">Параметры локального клиента, логов и автозапуска.</p>
+      </div>
+
+      <div class="card">
+        <h3>Ускорение BRUTAL Congestion</h3>
+        <div class="form-row mt-8">
+          <label>Целевая скорость BRUTAL (Мбит/с):
+            <input id="brutalMbps" type="number" class="input-sm" placeholder="700" value="700">
+          </label>
+        </div>
+        <p class="hint-sm">Задаёт скорость безрезервной передачи пакетов. Рекомендуется 700 Мбит/с.</p>
+
+        <h3 class="mt-16">Автозапуск и автоподключение</h3>
+        <div class="checks-stack mt-8">
+          <label class="checkbox-item"><input type="checkbox" id="autoConnect"> Автоматически подключаться при запуске клиента</label>
+          <label class="checkbox-item"><input type="checkbox" id="autoStart"> Автозапуск клиента при старте Windows</label>
+        </div>
+
+        <h3 class="mt-16">Файловое логирование</h3>
+        <div class="checks-stack mt-8">
+          <label class="checkbox-item"><input type="checkbox" id="logEnabled"> Включить запись логов в файл</label>
+        </div>
+
+        <div class="form-row mt-8">
+          <label>Макс. размер файла лога (МБ):
+            <input id="logMaxMB" type="number" class="input-sm" value="1">
+          </label>
+          <label>Уровень детализации:
+            <select id="logLevel">
+              <option value="info">Рабочий (Info)</option>
+              <option value="debug">Отладка (Debug)</option>
+              <option value="trace">Полный (Trace)</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="mt-16">
+          <button id="btnSaveSettings" class="btn btn-primary">Сохранить настройки</button>
+          <span id="settingsMsg" class="form-msg"></span>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
 
 <script src="app.js"></script>
 </body>

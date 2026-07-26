@@ -1,195 +1,329 @@
+// Package mobile — адаптер QUIC Diver для Android (gomobile / Go-mobile).
+//
+// Интегрирует Android VpnService через файловый дескриптор TUN (fd) с движком
+// connectip (модель B) и локальным/серверным netstack stack.
 package mobile
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"log"
-	"os"
+	"net"
+	"net/netip"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/yosida95/uritemplate/v3"
 
 	"quicdiver/internal/client/config"
 	"quicdiver/internal/client/routing"
+	"quicdiver/internal/engine/connectip"
+	"quicdiver/internal/guard"
+	"quicdiver/internal/packet"
+	"quicdiver/internal/server/netstack"
+	"quicdiver/internal/transport/cip"
 )
 
-var (
-	mu          sync.Mutex
-	activeEngine *Engine
-)
+// StatusInfo — снимок состояния адаптера для передачи на Android (JSON).
+type StatusInfo struct {
+	State         string `json:"state"`
+	Since         string `json:"since"`
+	Attempts      int    `json:"attempts"`
+	LastError     string `json:"last_error,omitempty"`
+	BytesSent     uint64 `json:"bytes_sent"`
+	BytesReceived uint64 `json:"bytes_received"`
+	ActiveRules   int    `json:"active_rules"`
+}
 
-// Engine — контекст локального мобильного стека QUIC Diver для Android/iOS.
-type Engine struct {
+type mobileAdapter struct {
 	mu        sync.Mutex
+	running   bool
 	ctx       context.Context
 	cancel    context.CancelFunc
-	tunFile   *os.File
-	server    string
-	token     string
+	cfg       config.Config
 	router    *routing.Router
-	bytesIn   uint64
-	bytesOut  uint64
-	startedAt time.Time
+	guard     *guard.Guard
+	tunSource packet.Source
+	cipClient *cip.Client
+	state     string
+	since     time.Time
+	attempts  int
+	lastErr   string
+	bytesSent atomic.Uint64
+	bytesRecv atomic.Uint64
 }
 
-// MobileStatus — JSON структура текущего статуса для отображения в Android UI.
-type MobileStatus struct {
-	Connected  bool   `json:"connected"`
-	Server     string `json:"server"`
-	BytesIn    uint64 `json:"bytes_in"`
-	BytesOut   uint64 `json:"bytes_out"`
-	UptimeSec  int64  `json:"uptime_sec"`
-	LastError  string `json:"last_error,omitempty"`
-}
+var (
+	adapterLock   sync.Mutex
+	globalAdapter *mobileAdapter
+)
 
-// StartEngine открывает мобильный стек QUIC Diver поверх файлового дескриптора TUN Android VpnService.
-func StartEngine(tunFd int, serverAddr string, token string, rulesRaw string) error {
-	mu.Lock()
-	defer mu.Unlock()
+// StartEngine запускает обработку трафика TUN устройства.
+//
+//   - fd: файловый дескриптор TUN устройства от Android VpnService.
+//   - configJSON: JSON-конфигурация или ссылка-бандл (qd://...).
+func StartEngine(fd int, configJSON string) error {
+	adapterLock.Lock()
+	defer adapterLock.Unlock()
 
-	if activeEngine != nil {
-		return errors.New("мобильный движок уже запущен")
+	if globalAdapter != nil && globalAdapter.running {
+		_ = stopEngineLocked()
 	}
 
-	if tunFd <= 0 {
-		return errors.New("невалидный файловый дескриптор TUN")
+	var cfg config.Config
+	configJSON = strings.TrimSpace(configJSON)
+
+	if strings.HasPrefix(strings.ToLower(configJSON), config.BundleScheme) {
+		bundle, err := config.ParseBundle(configJSON)
+		if err != nil {
+			return fmt.Errorf("mobile: parse bundle: %w", err)
+		}
+		cfg = config.Default()
+		cfg.Apply(bundle)
+	} else if configJSON != "" && configJSON != "{}" {
+		cfg = config.Default()
+		if err := json.Unmarshal([]byte(configJSON), &cfg); err != nil {
+			return fmt.Errorf("mobile: unmarshal config: %w", err)
+		}
+	} else {
+		cfg = config.Default()
 	}
 
-	if strings.TrimSpace(serverAddr) == "" {
-		return errors.New("адрес узла не может быть пустым")
+	if fd < 0 {
+		return ErrInvalidFD
 	}
 
-	tunFile := os.NewFile(uintptr(tunFd), "tun")
-	if tunFile == nil {
-		return errors.New("не удалось обернуть файловый дескриптор TUN")
+	tunSource, err := NewFDSource(fd, cfg.Transport.MTU)
+	if err != nil {
+		return fmt.Errorf("mobile: create fd source: %w", err)
+	}
+
+	var rules []routing.Rule
+	if len(cfg.Routing.Rules) > 0 {
+		rulesStr := strings.Join(cfg.Routing.Rules, "\n")
+		parsedRules, err := routing.ParseRules(rulesStr)
+		if err == nil {
+			rules = parsedRules
+		}
+	}
+	rs := routing.Compile(rules, cfg.Routing.Default)
+	router := routing.NewRouter(rs)
+
+	var serverIPs []netip.Addr
+	for _, entry := range cfg.Node.Entries {
+		host, _, err := net.SplitHostPort(entry.Addr)
+		if err != nil {
+			host = entry.Addr
+		}
+		if ip, err := netip.ParseAddr(host); err == nil {
+			serverIPs = append(serverIPs, ip)
+		}
+	}
+	g := guard.New(serverIPs)
+	for _, b := range cfg.Capture.Bypass {
+		if p, err := netip.ParsePrefix(b); err == nil {
+			g.AddBypass(p)
+		}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	rules, err := routing.ParseRules(rulesRaw)
-	if err != nil {
-		rules = nil
-	}
-	r := routing.NewRouter(routing.Compile(rules, "direct"))
-
-	eng := &Engine{
+	a := &mobileAdapter{
+		running:   true,
 		ctx:       ctx,
 		cancel:    cancel,
-		tunFile:   tunFile,
-		server:    serverAddr,
-		token:     token,
-		router:    r,
-		startedAt: time.Now(),
+		cfg:       cfg,
+		router:    router,
+		guard:     g,
+		tunSource: tunSource,
+		state:     "connecting",
+		since:     time.Now(),
 	}
 
-	activeEngine = eng
+	globalAdapter = a
+	go a.runEngineWorker()
 
-	// Запускаем фоновый цикл обработки пакетов из TUN
-	go eng.packetLoop()
-
-	log.Printf("[mobile] Движок QUIC Diver запущен поверх TUN fd=%d к узлу %s", tunFd, serverAddr)
 	return nil
 }
 
-// StopEngine останавливает мобильный движок и закрывает сокет TUN.
+// StopEngine полностью останавливает движок и освобождает TUN-дескриптор.
 func StopEngine() error {
-	mu.Lock()
-	defer mu.Unlock()
+	adapterLock.Lock()
+	defer adapterLock.Unlock()
+	return stopEngineLocked()
+}
 
-	if activeEngine == nil {
+func stopEngineLocked() error {
+	if globalAdapter == nil {
 		return nil
 	}
-
-	activeEngine.cancel()
-	_ = activeEngine.tunFile.Close()
-	activeEngine = nil
-
-	log.Println("[mobile] Мобильный движок QUIC Diver остановлен")
+	globalAdapter.mu.Lock()
+	if !globalAdapter.running && globalAdapter.state == "stopped" {
+		globalAdapter.mu.Unlock()
+		globalAdapter = nil
+		return nil
+	}
+	globalAdapter.running = false
+	globalAdapter.state = "stopped"
+	if globalAdapter.cancel != nil {
+		globalAdapter.cancel()
+	}
+	if globalAdapter.tunSource != nil {
+		_ = globalAdapter.tunSource.Close()
+	}
+	if globalAdapter.cipClient != nil {
+		_ = globalAdapter.cipClient.Close()
+	}
+	globalAdapter.mu.Unlock()
+	globalAdapter = nil
 	return nil
 }
 
-// UpdateRules динамически обновляет правила роутинга на лету без перезапуска VPN.
-func UpdateRules(rulesRaw string) error {
-	mu.Lock()
-	defer mu.Unlock()
+// UpdateRules динамически обновляет маршрутные правила.
+func UpdateRules(rules string) error {
+	adapterLock.Lock()
+	defer adapterLock.Unlock()
 
-	if activeEngine == nil {
-		return errors.New("мобильный движок не запущен")
+	if globalAdapter == nil {
+		return errors.New("mobile: engine is not running")
 	}
 
-	rules, err := routing.ParseRules(rulesRaw)
+	parsed, err := routing.ParseRules(rules)
 	if err != nil {
-		return fmt.Errorf("ошибка парсинга правил: %w", err)
+		return fmt.Errorf("mobile: parse rules: %w", err)
 	}
 
-	activeEngine.router.Swap(routing.Compile(rules, "direct"))
-	log.Println("[mobile] Правила маршрутизации успешно обновлены в памяти")
+	globalAdapter.mu.Lock()
+	defer globalAdapter.mu.Unlock()
+
+	rs := routing.Compile(parsed, globalAdapter.cfg.Routing.Default)
+	globalAdapter.router.Swap(rs)
+	globalAdapter.cfg.Routing.Rules = strings.Split(rules, "\n")
+
 	return nil
 }
 
-// GetStatus возвращает JSON-строку с метриками и состоянием соединения для Android UI.
+// GetStatus возвращает текущий статус адаптера в формате JSON.
 func GetStatus() string {
-	mu.Lock()
-	defer mu.Unlock()
+	adapterLock.Lock()
+	a := globalAdapter
+	adapterLock.Unlock()
 
-	if activeEngine == nil {
-		data, _ := json.Marshal(MobileStatus{Connected: false})
-		return string(data)
-	}
-
-	activeEngine.mu.Lock()
-	st := MobileStatus{
-		Connected: true,
-		Server:    activeEngine.server,
-		BytesIn:   activeEngine.bytesIn,
-		BytesOut:  activeEngine.bytesOut,
-		UptimeSec: int64(time.Since(activeEngine.startedAt).Seconds()),
-	}
-	activeEngine.mu.Unlock()
-
-	data, _ := json.Marshal(st)
-	return string(data)
-}
-
-// ImportBundle парсит подписочную ссылку qd:// и возвращает JSON конфигурацию.
-func ImportBundle(link string) (string, error) {
-	bundle, err := config.ParseBundle(link)
-	if err != nil {
-		return "", fmt.Errorf("битая ссылка подписки: %w", err)
-	}
-
-	data, err := json.Marshal(bundle)
-	if err != nil {
-		return "", err
-	}
-
-	return string(data), nil
-}
-
-func (e *Engine) packetLoop() {
-	buf := make([]byte, 65535)
-	for {
-		select {
-		case <-e.ctx.Done():
-			return
-		default:
-			n, err := e.tunFile.Read(buf)
-			if err != nil {
-				if errors.Is(err, io.EOF) || errors.Is(err, os.ErrClosed) {
-					return
-				}
-				time.Sleep(10 * time.Millisecond)
-				continue
-			}
-
-			if n > 0 {
-				e.mu.Lock()
-				e.bytesOut += uint64(n)
-				e.mu.Unlock()
-			}
+	if a == nil {
+		info := StatusInfo{
+			State: "stopped",
+			Since: time.Now().UTC().Format(time.RFC3339),
 		}
+		b, _ := json.Marshal(info)
+		return string(b)
 	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	activeRules := 0
+	if a.router != nil && a.router.CurrentRuleset() != nil {
+		activeRules = len(a.router.CurrentRuleset().Rules())
+	}
+
+	info := StatusInfo{
+		State:         a.state,
+		Since:         a.since.UTC().Format(time.RFC3339),
+		Attempts:      a.attempts,
+		LastError:     a.lastErr,
+		BytesSent:     a.bytesSent.Load(),
+		BytesReceived: a.bytesRecv.Load(),
+		ActiveRules:   activeRules,
+	}
+
+	b, _ := json.Marshal(info)
+	return string(b)
+}
+
+// ImportBundle разбирает ссылку-бандл (qd://...) и возвращает её JSON-конфиг.
+func ImportBundle(bundleStr string) (string, error) {
+	bundle, err := config.ParseBundle(bundleStr)
+	if err != nil {
+		return "", fmt.Errorf("mobile: import bundle: %w", err)
+	}
+	cfg := config.Default()
+	cfg.Apply(bundle)
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		return "", fmt.Errorf("mobile: marshal config: %w", err)
+	}
+	return string(b), nil
+}
+
+func (a *mobileAdapter) runEngineWorker() {
+	defer func() {
+		a.mu.Lock()
+		a.running = false
+		a.state = "stopped"
+		a.mu.Unlock()
+	}()
+
+	eng := connectip.New(a.guard, nil)
+
+	if len(a.cfg.Node.Entries) > 0 && a.cfg.Node.Token != "" {
+		a.mu.Lock()
+		a.attempts++
+		a.mu.Unlock()
+
+		entry := a.cfg.Node.Entries[0]
+		tmpl := uritemplate.MustNew(fmt.Sprintf("https://%s/connect-ip", entry.Addr))
+		tlsConf := &tls.Config{InsecureSkipVerify: true, ServerName: entry.Authority()}
+
+		client, rsp, err := cip.DialAuth(a.ctx, entry.Addr, tmpl, tlsConf, a.cfg.Node.Token, "")
+		if err != nil {
+			a.mu.Lock()
+			a.lastErr = err.Error()
+			a.mu.Unlock()
+			// Falls back to netstack local processing if node dial fails
+			a.runNetstackFallback(eng)
+			return
+		}
+		defer client.Close()
+		if rsp != nil && rsp.Body != nil {
+			_ = rsp.Body.Close()
+		}
+
+		a.mu.Lock()
+		a.cipClient = client
+		a.state = "connected"
+		a.mu.Unlock()
+
+		_ = eng.Run(a.ctx, a.tunSource, client)
+	} else {
+		a.runNetstackFallback(eng)
+	}
+}
+
+func (a *mobileAdapter) runNetstackFallback(eng *connectip.Engine) {
+	ns, err := netstack.New(directDialer{})
+	if err != nil {
+		a.mu.Lock()
+		a.lastErr = err.Error()
+		a.state = "stopped"
+		a.mu.Unlock()
+		return
+	}
+
+	clientEp, serverEp := newNetstackTunnelPair()
+	defer clientEp.Close()
+	defer serverEp.Close()
+
+	a.mu.Lock()
+	a.state = "connected"
+	a.mu.Unlock()
+
+	go func() {
+		_ = ns.Run(a.ctx, serverEp)
+	}()
+
+	_ = eng.Run(a.ctx, a.tunSource, clientEp)
 }

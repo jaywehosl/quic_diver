@@ -30,9 +30,8 @@ const defaultMaxDatagram = 1200
 
 // udpBufSize — размер буферов UDP-сокета. Слишком малые теряют датаграммы при
 // всплесках; слишком большие дают bufferbloat (очередь копится → RTT под
-// нагрузкой растёт). Ориентир — покрыть BDP (800Мбит×15мс ≈ 1.4МБ) с запасом,
-// не больше. ОС может урезать до системного лимита (Linux net.core.rmem_max).
-const udpBufSize = 2 << 20
+// нагрузкой растёт). Ориентир — покрыть BDP (800Мбит×15мс ≈ 1.4МБ) с запасом (4МБ).
+const udpBufSize = 4 << 20
 
 func setUDPBuffers(pc *net.UDPConn) {
 	_ = pc.SetReadBuffer(udpBufSize)

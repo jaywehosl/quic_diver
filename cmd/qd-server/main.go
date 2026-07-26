@@ -20,6 +20,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"time"
 
@@ -71,6 +72,7 @@ func main() {
 	replicaEvery := flag.Duration("replica-every", 15*time.Minute,
 		"как часто реплика забирает базу у мастера (0 — не реплицировать)")
 	addUser := flag.Bool("add-user", false, "сгенерировать клиентский токен, записать в БД и выйти (нужен -db)")
+	brutalMbps := flag.Int("brutal", 700, "скорость BRUTAL congestion control в Мбит/с (0 — выключить/Cubic)")
 	genAdminToken := flag.Bool("gen-admin-token", false, "сгенерировать админ-токен и клиентскую ссылку подписки, записать в БД и выйти")
 	genTokenAlias := flag.Bool("gen-token", false, "псевдоним для -gen-admin-token")
 	userLabel := flag.String("label", "", "имя клиента для -add-user")
@@ -79,6 +81,15 @@ func main() {
 	log.SetPrefix("qd-server: ")
 
 	// Применение псевдонимов и переменных окружения
+	if envBrutal := os.Getenv("HYSTERIA_BRUTAL"); envBrutal != "" {
+		if v, err := strconv.Atoi(envBrutal); err == nil {
+			*brutalMbps = v
+		}
+	}
+	if *brutalMbps > 0 {
+		os.Setenv("QD_BRUTAL_MBPS", fmt.Sprintf("%d", *brutalMbps))
+		log.Printf("BRUTAL congestion control активирован: %d Mbps", *brutalMbps)
+	}
 	if *domainAlias != "" {
 		*authority = *domainAlias
 		if !strings.Contains(*authority, ":") {

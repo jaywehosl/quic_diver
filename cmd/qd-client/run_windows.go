@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/netip"
+	"os"
 	"strings"
 
 	"github.com/quic-go/quic-go/http3"
@@ -37,6 +38,13 @@ import (
 )
 
 func run(ctx context.Context, o options) error {
+	if o.brutalMbps > 0 {
+		os.Setenv("QD_BRUTAL_MBPS", fmt.Sprintf("%d", o.brutalMbps))
+		log.Printf("congestion: BRUTAL %d Мбит/с (потери игнорируются)", o.brutalMbps)
+	} else {
+		os.Unsetenv("QD_BRUTAL_MBPS")
+	}
+
 	// 0. Подобрать DNS, если прошлый запуск умер аварийно. Строго ДО резолва
 	//    домена узла: в реестре сейчас может стоять наш 127.0.0.1, а listener'а за
 	//    ним нет — резолв не отработает и клиент не поднимется вовсе.

@@ -33,17 +33,22 @@ func setupLog(quiet bool) func() {
 	}
 	path := filepath.Join(dir, "qd-client.log")
 
-	// Переполненный журнал начинаем заново, сохранив предыдущий.
+	cfg, _ := config.Load()
+	if !cfg.Logging.Enabled && quiet {
+		log.SetOutput(io.Discard)
+		return func() {}
+	}
+
 	if st, err := os.Stat(path); err == nil && st.Size() > maxLogSize {
 		os.Rename(path, path+".old")
 	}
 
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
+		log.SetOutput(io.Discard)
 		return func() {}
 	}
 	if quiet {
-		// Консоли нет — пишем только в файл.
 		log.SetOutput(f)
 	} else {
 		log.SetOutput(io.MultiWriter(os.Stderr, f))

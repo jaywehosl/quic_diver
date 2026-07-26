@@ -162,10 +162,10 @@ func withRuntimeNode(cfg config.Config, o options) config.Config {
 // panelAddr — где слушать панель. Только петля: панель управляет клиентом
 // целиком, и снаружи её быть не должно.
 func panelAddr(cfg config.Config) string {
-	if cfg.Panel.Addr != "" {
+	if cfg.Panel.Addr != "" && cfg.Panel.Addr != "127.0.0.1:0" && cfg.Panel.Addr != "127.0.0.1:47821" {
 		return cfg.Panel.Addr
 	}
-	return "127.0.0.1:0" // 0 — пусть система даст свободный порт
+	return "127.0.0.1:8765"
 }
 
 func (rt *clientRuntime) panelURL() string {

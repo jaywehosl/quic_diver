@@ -70,6 +70,28 @@ func listNodes(w http.ResponseWriter, r *http.Request, store *db.SQLite, cfg Con
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	foundSelf := false
+	for _, n := range nodes {
+		if n.ID == cfg.NodeID {
+			foundSelf = true
+			break
+		}
+	}
+	if !foundSelf && cfg.NodeID != "" {
+		selfNode := db.Node{
+			ID:        cfg.NodeID,
+			Addr:      cfg.Authority,
+			Enabled:   true,
+			Label:     "Главный узел (Master)",
+			Category:  "master",
+			LastSeen:  time.Now(),
+			UpdatedAt: time.Now(),
+		}
+		_ = store.PutNode(r.Context(), selfNode)
+		nodes = append(nodes, selfNode)
+	}
+
 	out := make([]nodeView, 0, len(nodes))
 	for _, n := range nodes {
 		self := n.ID == cfg.NodeID

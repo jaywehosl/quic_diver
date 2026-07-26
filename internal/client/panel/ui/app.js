@@ -451,15 +451,58 @@ async function adminView(what) {
 function renderNodes(box, list) {
   box.innerHTML = `
     <h3>Серверные узлы кластера</h3>
-    <table class="grid-table">
-      <tr><th>Узел (Домен)</th><th>Категория</th><th>Состояние</th><th>Команда установки</th></tr>
+    <div class="card mt-8">
+      <div class="form-row">
+        <input id="newNodeDomain" placeholder="Домен нового воркера (напр. worker1.example.com)" style="max-width:340px">
+        <button id="btnCreateNode" class="btn btn-primary">Добавить воркер узел</button>
+        <span id="nodeCreateMsg" class="form-msg"></span>
+      </div>
+    </div>
+    <div id="newWorkerInstallBox" class="mt-12"></div>
+    <table class="grid-table mt-12">
+      <tr><th>Узел (Домен)</th><th>Имя / Метка</th><th>Категория</th><th>Состояние</th><th>Команда установки</th></tr>
       ${list.map((n) => `<tr>
-        <td class="mono"><b>${esc(n.id)}</b>${n.self ? ' <span style="color:var(--accent)">(этот узел)</span>' : ''}</td>
-        <td>${esc(n.category || 'Основной')}</td>
+        <td class="mono"><b>${esc(n.id)}</b>${n.self ? ' <span style="color:var(--accent)">(этот мастер)</span>' : ''}</td>
+        <td>${esc(n.label || '—')}</td>
+        <td>${esc(n.category || 'worker')}</td>
         <td>${n.alive ? '<span style="color:var(--success)">● Онлайн</span>' : '<span style="color:var(--danger)">○ Офлайн</span>'}</td>
-        <td><input value="bash <(curl -sSL https://raw.githubusercontent.com/jaywehosl/quic_diver/main/deploy/install.sh) --role=worker --master=&quot;https://${esc(n.id)}:443&quot;" readonly style="font-size:11px"></td>
+        <td><input value="bash <(curl -sSL https://raw.githubusercontent.com/jaywehosl/quic_diver/main/deploy/install.sh) --role=worker --master=&quot;https://${esc(n.id)}:443&quot;" readonly class="code-editor" style="font-size:11px;padding:4px 8px"></td>
       </tr>`).join('')}
     </table>`;
+
+  if ($('btnCreateNode')) {
+    $('btnCreateNode').onclick = async () => {
+      const domain = $('newNodeDomain').value.trim();
+      if (!domain) { say($('nodeCreateMsg'), 'Укажите домен узла', 'err'); return; }
+      $('btnCreateNode').disabled = true;
+      try {
+        const res = await api('/api/node/qd-admin/nodes', {
+          method: 'POST', admin: adminToken, body: { id: domain }
+        });
+        say($('nodeCreateMsg'), 'Воркер узел создан!', 'ok');
+        $('newNodeDomain').value = '';
+        if (res && res.install) {
+          $('newWorkerInstallBox').innerHTML = `
+            <div class="card" style="border-color:var(--accent)">
+              <div style="color:var(--accent);font-weight:600">🚀 Выполните команду на новом сервере (${esc(domain)}):</div>
+              <textarea id="workerCmdText" rows="3" readonly class="code-editor mt-8">${esc(res.install)}</textarea>
+              <div class="mt-8"><button id="btnCopyWorkerCmd" class="btn btn-primary btn-sm">Скопировать команду</button></div>
+            </div>`;
+          if ($('btnCopyWorkerCmd')) {
+            $('btnCopyWorkerCmd').onclick = async () => {
+              await navigator.clipboard.writeText($('workerCmdText').value);
+              alert('Команда скопирована!');
+            };
+          }
+        }
+        adminView('nodes');
+      } catch (e) {
+        say($('nodeCreateMsg'), e.message, 'err');
+      } finally {
+        $('btnCreateNode').disabled = false;
+      }
+    };
+  }
 }
 
 function renderUsers(box, list) {

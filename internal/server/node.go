@@ -101,10 +101,21 @@ type Config struct {
 	SubscriptionPath string
 }
 
+func normalizeAuthority(authority string) string {
+	host, port, err := net.SplitHostPort(authority)
+	if err == nil {
+		if port == "443" {
+			return host
+		}
+		return net.JoinHostPort(host, port)
+	}
+	return authority
+}
+
 // Template строит URI Template connect-ip эндпоинта. Клиент и узел обязаны
 // использовать одинаковый (authority + path совпадают).
 func Template(authority, path string) *uritemplate.Template {
-	return uritemplate.MustNew(fmt.Sprintf("https://%s%s", authority, path))
+	return uritemplate.MustNew(fmt.Sprintf("https://%s%s", normalizeAuthority(authority), path))
 }
 
 // Run поднимает узел и блокируется до отмены ctx или фатальной ошибки.

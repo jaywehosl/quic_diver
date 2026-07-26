@@ -6,6 +6,7 @@ import (
 	"net"
 	"os/exec"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -81,8 +82,27 @@ func startRuntime(ctx context.Context, o options, cfg config.Config, quit contex
 	go sub.Run(ctx)
 
 	rt := &clientRuntime{
-		svc: service.New(func(sctx context.Context) error { return run(sctx, o) },
-			service.DefaultBackoff()),
+		svc: service.New(func(sctx context.Context) error {
+			curCfg := live.Get()
+			curOpts := o
+			if len(curCfg.Node.Entries) > 0 {
+				curOpts.server = curCfg.Node.Entries[0].Addr
+				curOpts.authority = curCfg.Node.Entries[0].Authority()
+			}
+			if curCfg.Node.Token != "" {
+				curOpts.token = curCfg.Node.Token
+			}
+			if len(curCfg.Routing.Rules) > 0 {
+				curOpts.rules = strings.Join(curCfg.Routing.Rules, ";")
+			}
+			if curCfg.Routing.Default != "" {
+				curOpts.routeDef = curCfg.Routing.Default
+			}
+			if curCfg.Transport.BrutalMbps > 0 {
+				curOpts.brutalMbps = curCfg.Transport.BrutalMbps
+			}
+			return run(sctx, curOpts)
+		}, service.DefaultBackoff()),
 		ctl: ctl, cfg: live, notices: notices, token: tok,
 		addr: panelAddr(cfg), quit: quit,
 	}
